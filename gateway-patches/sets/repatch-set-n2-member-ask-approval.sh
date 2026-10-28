@@ -151,6 +151,11 @@ def _kc_member_fetch_ok(event: Any) -> bool:
         # host before judging it, urlsplit does not, so the encoded spelling would hide the target.
         if "%" in parts.netloc:
             return False
+        # Non-ASCII authority: WHATWG parsers apply IDNA/UTS-46 mapping first (full-width dots and
+        # digits, soft hyphen), so the mapped spelling could be a loopback or internal target that
+        # urlsplit does not see. Fail closed; an IDN host must be written as punycode.
+        if not parts.netloc.isascii():
+            return False
         host = host.lower().rstrip(".")
         if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")) or "." not in host:
             return False

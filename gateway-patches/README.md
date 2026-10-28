@@ -125,7 +125,10 @@ What a member can ask for:
   `file:`/`ftp:` URLs, `localhost`, `.local`/`.internal` names, private,
   loopback and link-local addresses (including decimal/hex spellings), a
   percent sign in the host part of the URL (`http://127.0.0%2e1/`; a `%` in the
-  path or query is fine), other methods, and any body.
+  path or query is fine), a non-ASCII character in the host part (write an
+  internationalised host name as punycode, for example `xn--caf-dma.example.com`;
+  full-width dots and digits would otherwise hide a loopback address), other
+  methods, and any body.
 
 MCP tools never qualify (spawn, cron, sending messages and so on stay denied).
 Reading files in the channel workspace still needs no approval (Set Q).

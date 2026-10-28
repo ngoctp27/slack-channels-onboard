@@ -23,6 +23,11 @@ FETCH_BAD = [
     "http://169.254.169.%32%35%34/latest", "http://127.0.0%2e1/", "http://a.loca%6c/",
     "http://example.com%40127.0.0.1/", "http://%6c%6f%63%61%6c%68%6f%73%74/", "http://[::1%25lo]/",
     "http://user:p%40ss@example.com/", "http://exa%6dple.com/",
+    # non-ASCII host: IDNA/UTS-46 mapping turns these into the ASCII spellings above
+    "http://127.0.0\uff0e1/", "http://127.0.0\u30021/", "http://127.0.0\uff611/",
+    "http://169.254.169\uff0e254/", "http://a.b\u3002local/", "http://metadata.google\u3002internal/",
+    "http://\uff11\uff12\uff17.0.0.1/", "http://127.0.0.1\u00ad/", "http://a.lo\u00adcal/",
+    "http://caf\u00e9.example.com/", "http://user\u00e9@example.com/",
 ]
 
 
@@ -128,6 +133,9 @@ def test_member_fetch_hardening():
     assert not f("https://example.com", uri="http://127.0.0%2e1/")  # every spelling, encoded too
     # a percent sign in the path or query is fine; only the host part is judged
     assert f("https://example.com/a%20b?q=%2e%2e") and f("https://example.com/%7Euser")
+    assert not f("https://example.com", uri="http://127.0.0\uff0e1/")  # non-ASCII host, second spelling
+    # non-ASCII in the path or query is fine; an IDN host must be written as punycode
+    assert f("https://example.com/caf\u00e9?q=\u00e9") and f("https://xn--caf-dma.example.com/")
 
 
 def test_member_card_blocks(s):
