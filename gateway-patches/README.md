@@ -75,7 +75,7 @@ Combinations tested on pristine 0.9.0 and 0.10.0 trees:
 | + maintainers, open channels, ask-the-owner | `apply.sh --only b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3` |
 | + admins (0.10.0 only) | `apply.sh --only b,k,m,o,m2,o2,o3,n1` |
 | + admins, member buttons (0.10.0 only) | `apply.sh --only b,k,m,o,m2,o2,o3,n1,n3` |
-| Everything, including confinement | `apply.sh` |
+| Everything, including confinement | `apply.sh` (0.10.0 only: on 0.9.0 it stops at `n1`, so 0.9.0 users run `apply.sh --only b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3,s,t,u`) |
 
 "Everything" on 0.10.0 also includes the fork sets `n1` to `n4`, which change what
 admins and members may do. On 0.9.0 use
@@ -182,8 +182,28 @@ ephemeral "Chỉ owner/admin mới dùng được các nút này." and nothing r
   record; with no Set T the rule does nothing. In any other thread a member can
   answer a card. 0.10.0 does not record whose turn produced a card, so a member
   can answer a card another member's turn produced.
+  In a channel without Set T there is no such record, so a member's OPTIONS answer
+  in the owner's thread can use up the owner's question (the member's turn is
+  read-only and answers the card instead of the owner).
 
-A member's OPTIONS answer still cannot enter a linked dashboard thread (Set N1).
+A member's OPTIONS answer (a choice button, or the checkboxes' *Send*) is not run
+by the stock OPTIONS handlers, which call `handler.handle_message` on the native
+path (where the Set O defect below ends the turn at its first tool call, and the
+transport gates are skipped). N3 turns it into a typed message, the way Set T does
+for a maintainer: the card is claimed once and rewritten with the choice, the bot
+posts `<@member>: <choice>` in the thread, and the choice goes through
+`events._route_message`, so Sets O2, N2 and T apply to the turn. It does not need
+Set T. The refusals above (and a linked dashboard thread) come first, with the
+ephemeral and before the card is claimed. Action buttons (`action::`) are refused,
+a stale card is struck through, and an empty selection does nothing. The owner's
+and admins' OPTIONS answers keep the stock path.
+
+A member's Kill Now leaves other people's queued messages alone: it passes the
+presser's queue scope and keeps the queue for the successor session, as the stop
+confirmation does. The owner's and admins' Kill Now clears as before.
+
+A member's OPTIONS answer cannot enter a linked dashboard thread: N3 refuses it with
+the ephemeral, before anything is claimed.
 When a member presses a tool-approval button (allow, deny, trust, or the R3
 "whole turn" button), the bot posts a public notice in the card's thread
 (`<@user> không có quyền duyệt yêu cầu này: *tool*`, with the tool name escaped
@@ -214,17 +234,6 @@ A second owner/admin check sits in the branch just before the decision is read.
 Native approvals (review mode) are not changed by N4 (but see the known defect
 below). N4 needs N3 and R, and is in the `apply.sh` "everything" run only.
 
-### Known defect: Set O on the native path (0.10.0)
-
-On `v0.10.0` a member's tool request on the native path (a review-mode channel, or
-`messaging.use_transport` set to `false`) currently ends the turn with the error
-`Unexpected error handling message` instead of a clean deny. Set O calls
-`_is_heartbeat_safe_tool(event.title)`, and 0.10.0 expects the event, not a title
-string. The request is not approved (it fails closed). Turns of the owner and of
-admins, and the messaging-transport path, are not affected. It is not fixed in
-these sets yet; see
-[`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md#known-defect-set-o-on-the-native-path-0100).
-
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.
 
@@ -233,6 +242,21 @@ Set T needs `bwrap` (bubblewrap); without it confinement stays off and the
 strict approval gate applies. Set T mounts a fixed list of toolchain
 directories from your home read-only into the sandbox (`HOME_ALLOW_RO` in
 `sets/patch-src/kc_confine.py`); add yours there if an agent cannot find a tool.
+
+### Known defect: Set O on the native path (0.10.0)
+
+On `v0.10.0` a tool request from any sender who is not the owner and not an admin
+(a member, a maintainer, a participant in an open channel) on the native path (a
+review-mode channel, or `messaging.use_transport` set to `false`) currently ends
+the turn with the error `Unexpected error handling message` instead of a clean
+deny. Set O calls `_is_heartbeat_safe_tool(event.title)`, and 0.10.0 expects the
+event, not a title string. The request is not approved (it fails closed). Turns of
+the owner and of admins, and the messaging-transport path, are not affected. It is
+not fixed in these sets yet; see
+[`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md#known-defect-set-o-on-the-native-path-0100).
+A member's OPTIONS answer is no longer exposed to it: with Set N3 it is routed as
+a typed message on the transport path instead of the native handlers (see
+[Set N3](#set-n3-member-buttons)).
 
 ## Verify on Slack
 

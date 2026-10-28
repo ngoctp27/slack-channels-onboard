@@ -177,7 +177,7 @@ Notes on the larger groups:
 
 **Symptom.** When a non-owner's tool permission request arrives on the native path, the exception is caught by the handler's outer guard: the turn ends with `Unexpected error handling message` in the log and no clean deny or approval card for the member. The tool is not approved.
 
-**Who is affected.** Non-owner senders (members) in a channel that runs on the native `handler.handle_message` path: a review-mode channel, or any channel when `messaging.use_transport` is `false`. Not affected: the owner (L1 is skipped), admins (they rank as the owner), and the messaging-transport path (Set O2).
+**Who is affected.** Non-owner senders: every sender who is neither the owner nor an admin (members, maintainers, participants in an open channel) in a channel that runs on the native `handler.handle_message` path: a review-mode channel, or any channel when `messaging.use_transport` is `false`. Not affected: the owner (L1 is skipped), admins (they rank as the owner), and the messaging-transport path (Set O2). A member's OPTIONS answer used to reach this path from any channel, because the stock OPTIONS handlers call `handle_message` directly. Set N3 now turns that answer into a typed message on the transport path, so OPTIONS is no longer affected for members; the owner's and admins' OPTIONS answers stay on the native path, where they are not affected.
 
 **Safety.** It fails closed: the request is never approved by the error. The cost is a broken turn instead of a clean read-only deny.
 
