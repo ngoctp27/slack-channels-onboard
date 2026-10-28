@@ -49,6 +49,8 @@ const en = {
     refuses
       ? 'Agent backend: the harness the channel\'s agent runs on, for new threads. A backend that is not installed or is blocked makes the bot refuse and say why in the thread; it never falls back to Kiro CLI.'
       : 'Agent backend: the harness the channel\'s agent runs on, for new threads. On this gateway a backend that cannot run falls back to Kiro CLI.',
+  topicLabel: 'Topic',
+  descriptionLabel: 'Description',
   botLeft: 'bot is no longer in the channel',
   unbind: 'Unbind',
   unbindConfirm: (c: string) => `Remove the configuration of #${c}? The bot has left this channel. Its agent, workspace and memory are kept.`,
@@ -158,6 +160,8 @@ const vi: Partial<Strings> = {
     refuses
       ? 'Agent backend: harness mà agent của channel chạy trên, áp dụng cho thread mới. Backend chưa cài hoặc bị chặn thì bot từ chối chạy và báo lý do trong thread, không tự chuyển sang Kiro CLI.'
       : 'Agent backend: harness mà agent của channel chạy trên, áp dụng cho thread mới. Trên gateway này, backend không chạy được sẽ tự chuyển sang Kiro CLI.',
+  topicLabel: 'Chủ đề',
+  descriptionLabel: 'Mô tả',
   botLeft: 'bot không còn trong channel',
   unbind: 'Gỡ',
   unbindConfirm: (c) => `Gỡ cấu hình của #${c}? Bot đã rời channel này. Agent, workspace và memory được giữ nguyên.`,

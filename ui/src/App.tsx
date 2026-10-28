@@ -29,6 +29,26 @@ interface Row {
   workspace_dir?: string
   memory_store?: string
   acp_backend?: string | null
+  topic?: string
+  description?: string
+}
+
+function ChannelAbout({ row }: { row: Row }) {
+  if (!row.topic && !row.description) return null
+  return (
+    <div className="mt-1 max-w-[320px] space-y-0.5 text-xs text-muted" data-testid={`about-${row.id}`}>
+      {row.topic && (
+        <div className="break-words">
+          <span className="font-medium">{t.topicLabel}:</span> {row.topic}
+        </div>
+      )}
+      {row.description && (
+        <div className="break-words">
+          <span className="font-medium">{t.descriptionLabel}:</span> {row.description}
+        </div>
+      )}
+    </div>
+  )
 }
 
 interface Settings {
@@ -167,6 +187,7 @@ function ConfiguredRow({ row, open, canOpen, backends, hasMaintainers, onSaved, 
       <td className="py-2 pr-3">
         <div className="font-medium">#{row.name || row.id}</div>
         <div className="text-xs text-muted">{row.id}</div>
+        <ChannelAbout row={row} />
         {!row.bot_member && (
           <div className="mt-1 flex items-center gap-2">
             <Badge variant="warn">{t.botLeft}</Badge>
@@ -223,6 +244,7 @@ function PendingRow({ row, settings, onDone, onError }: { row: Row; settings: Se
       <td className="py-2 pr-3">
         <div className="font-medium">#{row.name || row.id}</div>
         <div className="text-xs text-muted">{row.id}</div>
+        <ChannelAbout row={row} />
       </td>
       <td className="py-2 pr-3 text-sm text-muted">
         <span className="font-mono">{t.pendingPlan(row.name || row.id, settings.workspace_root, settings.dedicated_memory)}</span>
