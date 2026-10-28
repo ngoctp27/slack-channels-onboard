@@ -20,11 +20,14 @@
 #      may_send_to) also accept an admin through _kc_admin_ok.
 #   3. The four primary-owner-only actions refuse an admin with
 #      "⛔ Chỉ owner chính dùng được lệnh này.":
-#        - routing a message into a linked dashboard thread (O3 now asks primary)
+#        - routing a message into a linked dashboard thread. An admin's message there
+#          is dropped (the router returns True, so the turn does not fall through
+#          into the dashboard session); a member keeps the Set O3 fall-through
 #        - turning YOLO on / renewing it (/kirocrew yolo and !yolo; "off" stays open)
 #        - minting a dashboard link (send_dashboard_link, one gate for /kirocrew
 #          dashboard and !dashboard — this closes !dashboard for members too)
-#        - !link-to-dashboard
+#        - linking a thread to the dashboard: !link-to-dashboard and the "Link to
+#          Dashboard" button (slack/interactions.py), both end in the same import
 #      The dashboard itself already compares against the primary owner id.
 #
 # An admin-opened thread in a sandboxed channel runs unsandboxed, like the owner's.
@@ -160,25 +163,6 @@ plan(
     ),
 )
 
-# ------------------------------------------------ 3. linked slot (one of three files)
-SLOT_OLD = (
-    '    if is_allowed_user(user_id) and not is_owner(user_id):\n'
-    '        logger.info("Set O3: member %s not routed into linked slot", user_id)\n'
-)
-SLOT_NEW = (
-    f'    # Set N1 ({MARK}): an admin is not routed into a linked dashboard slot either.\n'
-    '    if is_allowed_user(user_id) and not is_owner(user_id, primary=True):\n'
-    '        logger.info("Set N1: %s not routed into linked slot (primary owner only)", user_id)\n'
-)
-slot_files = [
-    rel for rel in ("slack/handler.py", "slack/handler_runtime/inbound.py", "slack/handler_runtime/dispatch.py")
-    if (site / rel).exists() and (SLOT_OLD in read(rel) or (MARK in read(rel) and "Set N1: %s not routed" in read(rel)))
-]
-if len(slot_files) != 1:
-    fail(f"linked-slot anchor found in {len(slot_files)} files ({slot_files})")
-plan(slot_files[0], [(SLOT_OLD, SLOT_NEW)], needs=(PREREQ,))
-
-# ------------------------------------------------ 4. /kirocrew yolo (events.py)
 denied_sel = (
     "{ind}sel().log_api_access(\n"
     "{ind}    caller={caller},\n"
@@ -188,6 +172,39 @@ denied_sel = (
     '{ind}    error="primary owner only (Set N1)",\n'
     "{ind})\n"
 )
+
+# ------------------------------------------------ 3. linked slot (one of three files)
+# An admin is DROPPED here (return True): callers go on with the turn only on False, and a
+# linked thread resolves to the dashboard session key, so False would let the admin drive the
+# owner's dashboard conversation. A member keeps the Set O3 fall-through (read-only by Set O2).
+SLOT_OLD = (
+    '    if is_allowed_user(user_id) and not is_owner(user_id):\n'
+    '        logger.info("Set O3: member %s not routed into linked slot", user_id)\n'
+    '        return False\n'
+)
+SLOT_NEW = (
+    f'    # Set N1 ({MARK}): neither an admin nor a member is routed into a linked dashboard slot.\n'
+    '    if is_allowed_user(user_id) and not is_owner(user_id, primary=True):\n'
+    '        if is_owner(user_id):\n'
+    '            logger.info("Set N1: admin %s dropped in linked thread (primary owner only)", user_id)\n'
+    + denied_sel.format(ind="            ", caller="user_id").replace('"slack.yolo"', '"slack.linked_thread"')
+    + '            try:\n'
+    f'                await slack.post_message(channel, "{C6}", reply_ts)\n'
+    '            except Exception:\n'
+    '                logger.debug("Set N1: linked-thread notice failed", exc_info=True)\n'
+    '            return True\n'
+    '        logger.info("Set O3: member %s not routed into linked slot", user_id)\n'
+    '        return False\n'
+)
+slot_files = [
+    rel for rel in ("slack/handler.py", "slack/handler_runtime/inbound.py", "slack/handler_runtime/dispatch.py")
+    if (site / rel).exists() and (SLOT_OLD in read(rel) or (MARK in read(rel) and "Set N1: admin %s dropped" in read(rel)))
+]
+if len(slot_files) != 1:
+    fail(f"linked-slot anchor found in {len(slot_files)} files ({slot_files})")
+plan(slot_files[0], [(SLOT_OLD, SLOT_NEW)], needs=(PREREQ,))
+
+# ------------------------------------------------ 4. /kirocrew yolo (events.py)
 plan(
     "slack/events.py",
     [(
@@ -255,6 +272,27 @@ plan(
         + denied_sel.format(ind="        ", caller="user_id").replace('"slack.yolo"', '"slack.dashboard_link"')
         + '        return ""\n'
         "    session_ttl = min(ttl, MAX_SESSION_TTL_SECS)\n",
+    )],
+)
+
+# ------------------------------------------------ 8. "Link to Dashboard" button (interactions.py)
+plan(
+    "slack/interactions.py",
+    [(
+        "    if action_id == LINK_DASHBOARD_ACTION:\n"
+        '        user_id = payload.get("user", {}).get("id", "")\n',
+        "    if action_id == LINK_DASHBOARD_ACTION:\n"
+        '        user_id = payload.get("user", {}).get("id", "")\n'
+        f"        # Set N1 ({MARK}): the button ends in the same import as !link-to-dashboard, so it is\n"
+        "        # for the primary owner only.\n"
+        "        if not is_owner(user_id, primary=True):\n"
+        + denied_sel.format(ind="            ", caller="user_id").replace('"slack.yolo"', '"slack.link_to_dashboard"')
+        + "            if channel and user_id and _orch and _orch.slack:\n"
+        "                try:\n"
+        f'                    await _orch.slack.post_ephemeral(channel, user_id, "{C6}")\n'
+        "                except Exception:\n"
+        '                    logger.debug("Set N1 ephemeral failed", exc_info=True)\n'
+        "            return\n",
     )],
 )
 

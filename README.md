@@ -60,11 +60,13 @@ Slack (`users:read`), so bots and deactivated accounts are refused.
 rank as the owner on Slack: they approve cards and use the owner commands.
 Set it in the gateway's service definition (launchd plist or systemd unit). A
 `kirocrew restart` from a shell that lacks the variable drops the admins (fail
-closed). Admins cannot enter a linked dashboard thread, turn YOLO on or renew
-it, get a dashboard link, or link a thread to the dashboard; only the primary
-owner can, and `!dashboard` is now primary-owner-only too. A thread an admin
-opens runs unconfined, like the owner's. A mention in an approval card only
-notifies admins who are in that channel.
+closed). Admins cannot enter a linked dashboard thread (their message there is
+dropped and answered with a refusal), turn YOLO on or renew it, get a dashboard
+link, or link a thread to the dashboard (`!link-to-dashboard` and the "Link to
+Dashboard" button); only the primary owner can, and `!dashboard` is now
+primary-owner-only too. A thread an admin opens runs unconfined, like the
+owner's. A mention in an approval card only notifies admins who are in that
+channel.
 
 These controls exist only on a gateway carrying the patch sets in
 [`gateway-patches/`](gateway-patches/README.md). Read that page before applying

@@ -87,11 +87,17 @@ commands) except for four things that stay with the primary owner:
 - turning YOLO on or renewing it (`off` stays open to admins);
 - getting a dashboard link (`/kirocrew dashboard` and `!dashboard`; this also
   closes `!dashboard` for members);
-- `!link-to-dashboard`.
+- linking a thread to the dashboard: `!link-to-dashboard` and the "Link to
+  Dashboard" button that the bot puts on its replies.
 
-The YOLO and `!link-to-dashboard` commands answer an admin with
-`⛔ Chỉ owner chính dùng được lệnh này.`. A linked thread ignores the admin, and
-`/kirocrew dashboard` gives the usual `❌ Failed to send dashboard link.`
+The YOLO commands, `!link-to-dashboard` and the button answer an admin with
+`⛔ Chỉ owner chính dùng được lệnh này.` (the button as an ephemeral message).
+An admin's message in a linked thread is dropped, with the same refusal posted
+in the thread. Nothing reaches the dashboard session, and that includes `!`
+commands typed there; the admin uses another thread for those. Members in a
+linked thread keep the Set O3 behaviour: the message is not routed to the
+dashboard slot, and Set O2 keeps members read-only. `/kirocrew dashboard` gives the usual
+`❌ Failed to send dashboard link.`
 
 Admins are not added to `slack.allowed_users`, because the dashboard writes
 replace that list. With no owner configured nobody is an owner, admins
