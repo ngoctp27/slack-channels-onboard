@@ -78,8 +78,16 @@ jobs:
         run: |
           pristine="$RUNNER_TEMP/kirocrew/src/kiro_crew"
           fail=0
-          # The combinations gateway-patches/README.md documents; "all" = every set.
-          for combo in b b,u b,k,m,o,m2,o2,o3 b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3 all; do
+          # The combinations gateway-patches/README.md documents. "all" = every set,
+          # including the ones written for 0.10.0 only, so 0.9.0 gets the explicit
+          # list of the sets it supports instead.
+          combos="b b,u b,k,m,o,m2,o2,o3 b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3"
+          if [ "${{ matrix.kirocrew }}" = v0.10.0 ]; then
+            combos="$combos all"
+          else
+            combos="$combos b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3,s,t,u"
+          fi
+          for combo in $combos; do
             rm -rf "$KC_SITE" && cp -r "$pristine" "$KC_SITE"
             args=(); [ "$combo" = all ] || args=(--only "$combo")
             for run in first rerun; do
@@ -95,3 +103,9 @@ jobs:
             done
           done
           exit $fail
+      - name: Behaviour tests on the patched gateway
+        if: matrix.kirocrew == 'v0.10.0'
+        env:
+          KC_SRC: ${{ runner.temp }}/kirocrew
+          KC_UPSTREAM_REGRESSION: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+        run: bash tests/gateway/run.sh
