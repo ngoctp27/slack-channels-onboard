@@ -147,6 +147,10 @@ def _kc_member_fetch_ok(event: Any) -> bool:
             return False
         if parts.scheme not in ("http", "https") or not host:
             return False
+        # A percent sign anywhere in the authority (host or userinfo): WHATWG parsers decode the
+        # host before judging it, urlsplit does not, so the encoded spelling would hide the target.
+        if "%" in parts.netloc:
+            return False
         host = host.lower().rstrip(".")
         if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")) or "." not in host:
             return False

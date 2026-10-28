@@ -123,8 +123,9 @@ What a member can ask for:
 - a web fetch that is `http`/`https`, `GET` with no body, to a host name with a
   dot or a global IP address. The card shows the URL. Refused without a card:
   `file:`/`ftp:` URLs, `localhost`, `.local`/`.internal` names, private,
-  loopback and link-local addresses (including decimal/hex spellings), other
-  methods, and any body.
+  loopback and link-local addresses (including decimal/hex spellings), a
+  percent sign in the host part of the URL (`http://127.0.0%2e1/`; a `%` in the
+  path or query is fine), other methods, and any body.
 
 MCP tools never qualify (spawn, cron, sending messages and so on stay denied).
 Reading files in the channel workspace still needs no approval (Set Q).

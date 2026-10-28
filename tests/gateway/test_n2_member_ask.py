@@ -19,6 +19,10 @@ FETCH_BAD = [
     "file:///etc/passwd", "ftp://example.com", "http://localhost:8080", "http://127.0.0.1",
     "http://[::1]/", "http://10.0.0.5", "http://192.168.1.1", "http://169.254.169.254/latest/meta-data",
     "http://2130706433", "http://0x7f.0.0.1", "http://printer.local", "http://intranet", "",
+    # percent-encoded host: WHATWG parsers decode it before judging the address
+    "http://169.254.169.%32%35%34/latest", "http://127.0.0%2e1/", "http://a.loca%6c/",
+    "http://example.com%40127.0.0.1/", "http://%6c%6f%63%61%6c%68%6f%73%74/", "http://[::1%25lo]/",
+    "http://user:p%40ss@example.com/", "http://exa%6dple.com/",
 ]
 
 
@@ -121,6 +125,9 @@ def test_member_fetch_hardening():
     assert not f("http://exa mple.com/") and not f("https://example.com", json={"a": 1})
     assert td._kc_member_fetch_ok(make_event(tool_kind="fetch", raw_tool_params={"uri": "https://example.com"}))
     assert not td._kc_member_fetch_ok(make_event(tool_kind="fetch", raw_tool_params={"url": 5}))
+    assert not f("https://example.com", uri="http://127.0.0%2e1/")  # every spelling, encoded too
+    # a percent sign in the path or query is fine; only the host part is judged
+    assert f("https://example.com/a%20b?q=%2e%2e") and f("https://example.com/%7Euser")
 
 
 def test_member_card_blocks(s):
