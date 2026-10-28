@@ -20,6 +20,9 @@ Without the optional sets, the app hides their features and their routes refuse.
   They are written against **Kiro Crew 0.9.0 and 0.10.0**. On any other version an anchor
   may not match: that set stops with `CHECK ANCHORS`, writes nothing, and
   `apply.sh` stops there. They are not a supported Kiro Crew feature.
+- **Sets `n1` and later are for 0.10.0 only.** They check the version first and
+  stop with `CHECK ANCHORS`, writing nothing, on any other version (0.9.0
+  included). Skip them on 0.9.0.
 - **A Kiro Crew update overwrites them.** Re-run `apply.sh` after every update.
   A set that finds the fix already shipped upstream turns itself into a no-op.
 - The Slack approval buttons added by Set R/R3 are in Vietnamese
@@ -40,6 +43,7 @@ The app detects every feature at runtime, by the function the gateway exposes
 | Approved programs; owner asked in Slack | R, R2, R3 | proposed in kirodotdev/KiroCrew#22759 |
 | Open channels (every channel member, read-only) | Q, Q2 | proposed in kirodotdev/KiroCrew#22759 |
 | Workspace confinement for maintainer channels; a thread the owner opens runs unconfined and is owner-only | T (+ `sets/patch-src/kc_confine.py`) | proposed in kirodotdev/KiroCrew#22759 |
+| Admins (`KIROCREW_ADMIN_USER_IDS`) rank as owner on Slack, except the four primary-owner actions | N1 | fork-only, 0.10.0 |
 | Agent backend per channel | U | issue kirodotdev/KiroCrew#21910, PR #16200 (open) |
 | (support) | S: `KIROCREW_SLACK_TEAM_ID` in the agent env | PR kirodotdev/KiroCrew#22380, merged after 0.10.0; the set no-ops on a release that carries it |
 
@@ -66,7 +70,34 @@ Combinations tested on pristine 0.9.0 and 0.10.0 trees:
 | Core + agent backend per channel | `apply.sh --only b,u` |
 | + members (read-only) | `apply.sh --only b,k,m,o,m2,o2,o3` |
 | + maintainers, open channels, ask-the-owner | `apply.sh --only b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3` |
+| + admins (0.10.0 only) | `apply.sh --only b,k,m,o,m2,o2,o3,n1` |
 | Everything, including confinement | `apply.sh` |
+
+"Everything" on 0.10.0 also includes the fork sets `n1` to `n4`, which change what
+admins and members may do. On 0.9.0 use
+`apply.sh --only b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3,s,t,u` instead.
+
+### Set N1: admins
+
+`KIROCREW_ADMIN_USER_IDS` is a comma-separated list of Slack user ids, read on
+every check. Each listed person ranks as the owner on Slack (approve cards, owner
+commands) except for four things that stay with the primary owner:
+
+- sending messages into a linked dashboard thread;
+- turning YOLO on or renewing it (`off` stays open to admins);
+- getting a dashboard link (`/kirocrew dashboard` and `!dashboard`; this also
+  closes `!dashboard` for members);
+- `!link-to-dashboard`.
+
+The YOLO and `!link-to-dashboard` commands answer an admin with
+`⛔ Chỉ owner chính dùng được lệnh này.`. A linked thread ignores the admin, and
+`/kirocrew dashboard` gives the usual `❌ Failed to send dashboard link.`
+
+Admins are not added to `slack.allowed_users`, because the dashboard writes
+replace that list. With no owner configured nobody is an owner, admins
+included. The dashboard itself still compares against the primary owner only.
+A thread an admin opens in a confined channel runs unconfined, as the owner's
+does (Set T).
 
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.

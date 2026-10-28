@@ -55,6 +55,17 @@ only those:
 The roles file is written atomically with mode 600. User IDs are checked against
 Slack (`users:read`), so bots and deactivated accounts are refused.
 
+**Admins.** On a 0.10.0 gateway carrying Set N1, the people listed in the
+`KIROCREW_ADMIN_USER_IDS` environment variable (comma-separated Slack user ids)
+rank as the owner on Slack: they approve cards and use the owner commands.
+Set it in the gateway's service definition (launchd plist or systemd unit). A
+`kirocrew restart` from a shell that lacks the variable drops the admins (fail
+closed). Admins cannot enter a linked dashboard thread, turn YOLO on or renew
+it, get a dashboard link, or link a thread to the dashboard; only the primary
+owner can, and `!dashboard` is now primary-owner-only too. A thread an admin
+opens runs unconfined, like the owner's. A mention in an approval card only
+notifies admins who are in that channel.
+
 These controls exist only on a gateway carrying the patch sets in
 [`gateway-patches/`](gateway-patches/README.md). Read that page before applying
 them: they change who may use the bot, target Kiro Crew 0.9.0 and 0.10.0, and must be
