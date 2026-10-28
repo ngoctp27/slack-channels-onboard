@@ -58,6 +58,9 @@ VENV="$HOME/.local/share/pipx/venvs/kirocrew"
 PY="$VENV/bin/python"
 "$PY" -m pip install -q --disable-pip-version-check -e "$WORK/kirocrew[dev]"
 
+# Set to 1 when either upstream run did not finish; the difference below is then unreliable.
+UPSTREAM_INCOMPLETE=""
+
 # Failed/errored node ids of Kiro Crew's own suite, one per line, sorted.
 run_upstream() {
   local out="$1" log="$1.log"
@@ -75,6 +78,7 @@ run_upstream() {
   (cd "$WORK/kirocrew" && "$PY" -m pytest $targets -q -p no:cacheprovider -n auto -rfE --color=no >"$log" 2>&1) || rc=$?
   if [ "$rc" -gt 1 ]; then
     echo "!! upstream run did not complete (rc=$rc), see $log"
+    UPSTREAM_INCOMPLETE=1
   fi
   echo "   pytest: $(grep -E '^[=]* *[0-9]+ (passed|failed|error|skipped)|no tests ran' "$log" | tail -n 1 || true)"
   # A parametrized id can contain spaces, so cut at the " - <message>" separator, not at the first space.
@@ -102,9 +106,12 @@ fi
 if [ -n "$KC_UPSTREAM_REGRESSION" ]; then
   echo ">>> upstream suite on the patched tree"
   run_upstream "$WORK/upstream-patched.txt"
-  echo "newly failing:"
+  unreliable=""
+  [ -z "$UPSTREAM_INCOMPLETE" ] || unreliable=" (UNRELIABLE: an upstream run did not complete)"
+  [ -z "$UPSTREAM_INCOMPLETE" ] || echo "!! the two lists below are unreliable, an upstream run did not complete"
+  echo "newly failing:$unreliable"
   LC_ALL=C comm -13 "$WORK/upstream-pristine.txt" "$WORK/upstream-patched.txt" | sed 's/^/  /'
-  echo "newly passing:"
+  echo "newly passing:$unreliable"
   LC_ALL=C comm -23 "$WORK/upstream-pristine.txt" "$WORK/upstream-patched.txt" | sed 's/^/  /'
 fi
 

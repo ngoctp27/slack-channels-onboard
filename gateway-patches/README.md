@@ -211,8 +211,19 @@ hết hạn, hoặc không thuộc về bạn.":
 When a click does resolve, the bot posts `🔐 <result> — <@approver>` in the thread,
 so the thread shows who decided, an admin approving a member's request included.
 A second owner/admin check sits in the branch just before the decision is read.
-Native approvals (review mode) are not changed. N4 needs N3 and R, and is in the
-`apply.sh` "everything" run only.
+Native approvals (review mode) are not changed by N4 (but see the known defect
+below). N4 needs N3 and R, and is in the `apply.sh` "everything" run only.
+
+### Known defect: Set O on the native path (0.10.0)
+
+On `v0.10.0` a member's tool request on the native path (a review-mode channel, or
+`messaging.use_transport` set to `false`) currently ends the turn with the error
+`Unexpected error handling message` instead of a clean deny. Set O calls
+`_is_heartbeat_safe_tool(event.title)`, and 0.10.0 expects the event, not a title
+string. The request is not approved (it fails closed). Turns of the owner and of
+admins, and the messaging-transport path, are not affected. It is not fixed in
+these sets yet; see
+[`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md#known-defect-set-o-on-the-native-path-0100).
 
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.
@@ -264,16 +275,25 @@ Checks (the quoted texts are what Slack shows, in Vietnamese):
 11. The admin types `/kirocrew yolo on` and gets
     `⛔ Chỉ owner chính dùng được lệnh này.` The admin types
     `/kirocrew yolo off` and it works.
-12. The admin and a member each type `/kirocrew dashboard` or `!dashboard` and
-    get `❌ Failed to send dashboard link.` No DM is sent. The primary owner still
-    gets the link.
-13. The admin writes in a linked dashboard thread. The message does not reach the
-    dashboard session, and the thread shows `⛔ Chỉ owner chính dùng được lệnh
-    này.` The "Link to Dashboard" button is refused for the admin the same way.
-14. Leave a member's card unanswered for more than 600 seconds. Press a button on
-    it: the card becomes `⏱ This approval already expired.` and the presser gets
+12. The primary owner still gets the dashboard link by DM. Other people get no DM:
+    - An admin types `/kirocrew dashboard` or `!dashboard` and gets
+      `❌ Failed to send dashboard link.`
+    - A member types `!dashboard` and gets the same
+      `❌ Failed to send dashboard link.`
+    - A member types `/kirocrew dashboard` and gets
+      `⛔ You are not authorized to use this command.` (every `/kirocrew`
+      subcommand is owner-only for members).
+13. The admin writes in a linked dashboard thread. The message does not reach
+    the dashboard session, and the thread shows a public
+    `⛔ Chỉ owner chính dùng được lệnh này.` The admin presses the "Link to
+    Dashboard" button: the same text arrives as an ephemeral message that only
+    the admin sees, and nothing is linked.
+14. Leave a member's card unanswered for more than 600 seconds. Then the owner
+    or an admin presses a button on it: the card becomes
+    `⏱ This approval already expired.` and the presser gets
     `⚠️ Không xử lý được nút này: yêu cầu đã được trả lời, đã hết hạn, hoặc không thuộc về bạn.`
-    A later attempt in the same turn is denied.
+    (A member who presses it gets the notice of item 3 instead.) A later attempt
+    in the same turn is denied.
 
 ## Undo
 
@@ -295,4 +315,5 @@ versions or on Windows.
 
 Kiro Crew's own Slack test files were run on a pristine and on a fully patched
 `v0.10.0` tree; every test that changed result is listed and traced to the set
-that causes it in [`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md).
+that causes it in [`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md). That run also
+found the native-path defect of Set O described above.

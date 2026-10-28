@@ -11,7 +11,7 @@ What happens to Kiro Crew's own Slack tests when the whole of `gateway-patches/`
 | Fully patched tree | 15820 passed, 24 skipped, **404 failed** |
 | Newly failing | **404** |
 | Newly passing | **0** (nothing failed on the pristine tree) |
-| Verdict | every change is traced to a set, and every group is an intended consequence of it (table below). No group is unexplained. |
+| Verdict | every change is traced to a set. 402 of the 404 are an intended consequence of that set. **2 are a defect of Set O** on the native (non-transport) path, which Set B's test failures hid at first: see "Known defect" below. |
 
 ## How it was produced
 
@@ -22,6 +22,8 @@ pytest $(grep -rl --include='test_*.py' 'kiro_crew\.slack' test | sort) -q -p no
 # 3. attribution: for each prefix of the apply order, a fresh pristine copy + `apply.sh --only <prefix>`,
 #    then only the failing ids
 pytest @failing-ids.txt -n 4 -q -p no:cacheprovider --junitxml=<prefix>.xml
+# 4. masking check (section "Masking"): the fully patched copy with the test fakes made to accept `cwd`,
+#    then the same 404 ids again
 ```
 
 The failure list of step 1 is the `newly failing:` block of `run.sh`. Its "newly passing" block is empty.
@@ -55,7 +57,30 @@ The failure list of step 1 is the `newly failing:` block of `run.sh`. Its "newly
 
 Without the five tests of the next section the series only grows: a test that fails at one prefix fails at every longer one. It ends at 399, and the five make 404. The raw column moves with those five. The group tables below count each of the five under the set found in the next section (`m2` three, `o` one, `n1` one), so `m2` has 14 there, not 11, and `o` and `n1` one more than in this table. (This subset run ends at 401, not 404, because three of the five passed in it.)
 
-Sets `p`, `p2`, `p3`, `q`, `q2`, `r2`, `r3`, `s`, `t`, `u`, `n2` and `n3` cause no new failure of their own among Kiro Crew's Slack tests.
+Two of the 336 tests attributed to `b` here are re-attributed to `o` in the next-but-one section ("Masking"). Sets `p`, `p2`, `p3`, `q`, `q2`, `r2`, `r3`, `s`, `t`, `u`, `n2` and `n3` cause no new failure of their own among Kiro Crew's Slack tests.
+
+## Masking
+
+The "first failing prefix" method has a limit. A test that Set B already breaks fails at prefix `b` for B's reason, so what a later set does to it is not visible: 336 of the 404 sit in the `b` row and nothing says whether they would still fail without B's effect. B's failure is a test artifact: the tests' fake `sessions.get_or_create` does not accept the `cwd=` keyword that B adds, and the real one does.
+
+How it was checked. On a copy of the fully patched tree, the two call sites B patched (`handler.py`, `transport_dispatch.py`) were changed in that copy only to pass `cwd` only when it is set (`**({"cwd": _cwd} if _cwd else {})`), which every fake accepts, and the same 404 ids were run again (`-n 4`):
+
+| | Count |
+|---|---:|
+| Pass with the fakes neutralised | 336 (333 of the B-attributed tests, and 3 order-dependent tests of other groups) |
+| Fail | 68 |
+
+Of the 336 tests attributed to `b` above, 333 pass. The other three still fail, for another reason:
+
+| Test | Failure | Real cause |
+|---|---|---|
+| `test_slack_handler_composition_contract.py::test_every_definition_is_in_exactly_one_place` | `'_agent_workspace_binding'` is an extra definition | Set B (its new helper), as in the group table |
+| `test_name_grant_surfaces.py::TestSlackHandlerSurface::test_refused_grant_downgrades_to_the_interactive_prompt` | `AttributeError: 'str' object has no attribute 'mcp_identity_trusted'` at `handler.py:2082` | **Set O, a defect** (next section) |
+| `test_slack_handler_more_coverage.py::TestToolHookVerdicts::test_trusted_session_auto_approves_in_interactive_mode` | the same `AttributeError` | **Set O, a defect** (next section) |
+
+The 65 other failures of the neutralised run are the other groups below (K 3, M2 13 of 14, O2 1, O3 23, R 2, N1 17 of 18, N4 6; the Set O trust test is among the passes); the three tests missing from M2 (one), O (the trust test) and N1 (one) are order-dependent ones that happened to pass in this run. The two defect tests were then run alone (`-n0`) on trees with the sets `b,k,m` (both pass) and `b,k,m,o` (both fail), with the same shim: Set O is the first set that breaks them.
+
+What this check does not cover. It sees only Kiro Crew's own tests that mention `kiro_crew.slack`. A set defect that no upstream test exercises stays invisible here, and the check says nothing about tests that pass on both trees. The 333 pass on the tree with all sets applied, so no later set changes them.
 
 ## Order-dependent tests
 
@@ -73,38 +98,40 @@ The first three come out of the xdist runs as "fail at `m2`, pass at `o2`, fail 
 
 ## Groups
 
-Intended: **yes** means the failure is the documented behaviour of that set (its header in `gateway-patches/sets/` says so) and the test asserts the stock behaviour that the set replaces, or drives the code with a stand-in the set's new check does not accept. No test is a bug of a set.
+Intended: **yes** means the failure is the documented behaviour of that set (its header in `gateway-patches/sets/` says so) and the test asserts the stock behaviour that the set replaces, or drives the code with a stand-in the set's new check does not accept. **Intended: no** marks the two tests that expose a defect in a set (Set O, next section).
 
 | Set | Test file | Count | Failure signature | Intended? | Why |
 |---|---|---:|---|---|---|
-| B | `test_channel_activation.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_close_guard_parity.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_credential_redaction_notice.py` | 6 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_interaction_telemetry.py` | 2 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_messaging_deny_notice.py` | 4 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_name_grant_surfaces.py` | 3 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_session_not_found_surfaces.py` | 3 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_dashboard_live_sync.py` | 5 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_delivery_debt_10242.py` | 11 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_handler.py` | 31 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_handler_approval.py` | 3 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
+| B | `test_channel_activation.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_close_guard_parity.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_credential_redaction_notice.py` | 6 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_interaction_telemetry.py` | 2 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_messaging_deny_notice.py` | 4 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_name_grant_surfaces.py` | 2 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_session_not_found_surfaces.py` | 3 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_dashboard_live_sync.py` | 5 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_delivery_debt_10242.py` | 11 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_handler.py` | 31 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_handler_approval.py` | 3 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
 | B | `test_slack_handler_composition_contract.py` | 1 | `'_agent_workspace_binding'` is an extra definition in handler.py | yes | Set B adds that helper to handler.py; the contract test lists every definition |
-| B | `test_slack_handler_composition_contract.py` | 43 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_handler_more_coverage.py` | 25 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_handler_rendering.py` | 30 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_handler_turn_outcomes.py` | 32 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_inline_stop.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_resume_lossless_replay.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_stream_held_tail.py` | 31 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_success_after_delivery_10050.py` | 21 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_thread_parent_transcript.py` | 10 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_thread_replies_context.py` | 7 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_thread_session_binding.py` | 8 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_transport_dispatch.py` | 46 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_slack_transport_integration.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
-| B | `test_thread_parent_context.py` | 9 | `get_or_create() got an unexpected keyword argument 'cwd'` (user sees "Something went wrong") | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it |
+| B | `test_slack_handler_composition_contract.py` | 43 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_handler_more_coverage.py` | 24 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_handler_rendering.py` | 30 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_handler_turn_outcomes.py` | 32 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_inline_stop.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_resume_lossless_replay.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_stream_held_tail.py` | 31 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_success_after_delivery_10050.py` | 21 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_thread_parent_transcript.py` | 10 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_thread_replies_context.py` | 7 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_thread_session_binding.py` | 8 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_transport_dispatch.py` | 46 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_slack_transport_integration.py` | 1 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
+| B | `test_thread_parent_context.py` | 9 | `get_or_create() got an unexpected keyword argument 'cwd'`; the test observes the "Something went wrong" notice | yes | B adds `cwd=` to `sessions.get_or_create`; the test's fake sessions reject it (the real `get_or_create` accepts `cwd`, so users do not see this) |
 | K | `test_slack_gateway.py` | 1 | `'U_STALE'` is still in `orch._allowed_users` | yes | Set K stops pruning `slack.allowed_users` down to the owner |
 | K | `test_slack_handler_session_commands.py` | 2 | `!stop` / `!title` from an allow-listed non-owner is no longer denied | yes | Set K makes `slack.allowed_users` members allowed users; the test expects owner-only |
+| O | `test_name_grant_surfaces.py` | 1 | `AttributeError: 'str' object has no attribute 'mcp_identity_trusted'` (`handler.py:2082`); the turn ends in "Unexpected error handling message", the approval is never asked | **no, defect** | Set O L1 calls `_is_heartbeat_safe_tool(event.title or "")`; on 0.10.0 that function takes the event, so every non-owner tool request on the native path raises (see "Known defect") |
+| O | `test_slack_handler_more_coverage.py` | 1 | same `AttributeError`; `provider.approved` is `[]` where the test expects `['rq3']` | **no, defect** | same cause: Set O L1 on the native `handle_message` path |
 | O | `test_slack_handler_more_coverage.py` | 1 | Trust click from a user whose allow check is revoked returns `None`, not `reject_tool` | yes | Set O L2 gates Approve/Trust on `is_owner`, so the second `is_allowed_user` re-check the test counts never runs |
 | M2 | `test_channel_activation.py` | 1 | non-owner DM dropped (`non-owner DM … blocked (Set M2)`): no reply, handler not called | yes | M2 drops non-owner DMs in `events._route_message`; the tests send from a `D…` channel as a non-owner |
 | M2 | `test_message_queue.py` | 4 | non-owner DM dropped (`non-owner DM … blocked (Set M2)`): no reply, handler not called | yes | M2 drops non-owner DMs in `events._route_message`; the tests send from a `D…` channel as a non-owner |
@@ -133,13 +160,28 @@ Intended: **yes** means the failure is the documented behaviour of that set (its
 | N1 | `test_tunnel_manager.py` | 2 | dashboard link path stops at `slack.dashboard_link` / mock never called | yes | N1 (D5): same refusal in `send_dashboard_link` |
 | N4 | `test_slack_interactions_coverage.py` | 6 | approval click is ignored (`resolve_global` / trust call made 0 times; ephemeral or card update not posted) | yes | N4 binds a click to a recorded requester and to the thread the prompt was asked in; these tests dispatch a click on a decider that has none (`requester_missing` / `no_pending_approval`) |
 
-Per set: B 336, K 3, O 1, M2 14, O2 1, O3 23, R 2, N1 18, N4 6 (total 404).
+Per set: B 334, K 3, O 3, M2 14, O2 1, O3 23, R 2, N1 18, N4 6 (total 404). Of these, 402 are intended; the 2 tests of Set O's L1 gate expose a defect.
 
 Notes on the larger groups:
 
-- **Set B (336).** The Slack chat path used to ask for a session named after the channel's agent alias with no working directory. Set B resolves the alias and passes `agent=` and `cwd=` (see its header; fixed upstream by kirodotdev/KiroCrew#22858). Every test whose `FakeSessionManager.get_or_create` has the old signature therefore fails the same way. Golden-transcript digests change for the same reason (the transcript now ends in the error notice). When a later set makes a message reach the handler that used to be stopped earlier (O3 `spawn`, N1 `test_non_owner_is_denied`), the same `cwd` error shows up as the follow-on, not as the cause.
+- **Set B (334).** The Slack chat path used to ask for a session named after the channel's agent alias with no working directory. Set B resolves the alias and passes `agent=` and `cwd=` (see its header; fixed upstream by kirodotdev/KiroCrew#22858). Every test whose `FakeSessionManager.get_or_create` has the old signature therefore fails the same way (333 tests; the 334th is the composition-contract test that lists every definition). The real `get_or_create` accepts `cwd`, so users never see the notice: only the tests do. Two tests that first looked like part of this group are not (section "Masking"). Golden-transcript digests change for the same reason (the transcript now ends in the error notice). When a later set makes a message reach the handler that used to be stopped earlier (O3 `spawn`, N1 `test_non_owner_is_denied`), the same `cwd` error shows up as the follow-on, not as the cause.
 - **Set O3 (23).** All sit behind the three or four owner-only gates of Set O3; each test drives a gated path as a user who is not the owner.
 - **Set M2 (14).** Each drives a DM (`D…`) channel as a non-owner.
+- **Set O (3).** One is the Trust click whose second allow check never runs (intended). Two are the defect below.
+
+## Known defect: Set O on the native path (0.10.0)
+
+**Where.** `gateway-patches/sets/repatch-set-o-member-readonly.sh`, gate L1 (inserted in `handler.handle_message`): `_kc_safe_tool(event.title or "")`, with `_kc_safe_tool` imported lazily from `kiro_crew.slack.gateway._is_heartbeat_safe_tool`.
+
+**Cause.** On 0.9.0 that function took the tool title (a `str`). On 0.10.0 it is `_is_heartbeat_safe_tool(event: LLMEvent)` and starts with `event.mcp_identity_trusted`. Set O passes a string, so the call raises `AttributeError: 'str' object has no attribute 'mcp_identity_trusted'` (`handler.py:2082`). Set O2 (the transport path) already handles both signatures, with a fallback import; Set O L1 does not.
+
+**Symptom.** When a non-owner's tool permission request arrives on the native path, the exception is caught by the handler's outer guard: the turn ends with `Unexpected error handling message` in the log and no clean deny or approval card for the member. The tool is not approved.
+
+**Who is affected.** Non-owner senders (members) in a channel that runs on the native `handler.handle_message` path: a review-mode channel, or any channel when `messaging.use_transport` is `false`. Not affected: the owner (L1 is skipped), admins (they rank as the owner), and the messaging-transport path (Set O2).
+
+**Safety.** It fails closed: the request is never approved by the error. The cost is a broken turn instead of a clean read-only deny.
+
+**Status.** Not fixed in this branch: the base sets are frozen here. The fix belongs in a separate change: call `_kc_safe_tool(event)` on 0.10.0 and keep the string call as a fallback for 0.9.0, as Set O2 does. Until then, treat a member's tool request on the native path as unsupported on 0.10.0. The two tests above (`test_refused_grant_downgrades_to_the_interactive_prompt`, `test_trusted_session_auto_approves_in_interactive_mode`) reproduce it. In a scratch copy, passing the event makes them fail differently: the member's request is now rejected as read-only (no approval prompt, nothing approved, no error in the log), which is Set O's intended behaviour, because both tests were written for a gateway where a non-owner's request is approved. So after the fix they move to the intended rows of Set O, and a separate test of the member deny on the native path is still needed.
 
 ## Failing tests by group
 
@@ -182,10 +224,9 @@ Notes on the larger groups:
 
 </details>
 
-<details><summary>Set B · <code>test_name_grant_surfaces.py</code> · 3 tests</summary>
+<details><summary>Set B · <code>test_name_grant_surfaces.py</code> · 2 tests</summary>
 
 - `test/test_name_grant_surfaces.py::TestSlackHandlerSurface::test_clean_grant_still_auto_approves`
-- `test/test_name_grant_surfaces.py::TestSlackHandlerSurface::test_refused_grant_downgrades_to_the_interactive_prompt`
 - `test/test_name_grant_surfaces.py::TestSlackHandlerSurface::test_the_decline_is_audited`
 
 </details>
@@ -322,7 +363,7 @@ Notes on the larger groups:
 
 </details>
 
-<details><summary>Set B · <code>test_slack_handler_more_coverage.py</code> · 25 tests</summary>
+<details><summary>Set B · <code>test_slack_handler_more_coverage.py</code> · 24 tests</summary>
 
 - `test/test_slack_handler_more_coverage.py::TestAcpFailureLadder::test_process_died_is_reported`
 - `test/test_slack_handler_more_coverage.py::TestAcpFailureLadder::test_prompt_busy_reset_failure_is_swallowed`
@@ -344,7 +385,6 @@ Notes on the larger groups:
 - `test/test_slack_handler_more_coverage.py::TestToolHookVerdicts::test_permission_request_hook_auto_approve`
 - `test/test_slack_handler_more_coverage.py::TestToolHookVerdicts::test_permission_request_hook_deny`
 - `test/test_slack_handler_more_coverage.py::TestToolHookVerdicts::test_tool_call_deny_is_surfaced_as_unenforceable_warning`
-- `test/test_slack_handler_more_coverage.py::TestToolHookVerdicts::test_trusted_session_auto_approves_in_interactive_mode`
 - `test/test_slack_handler_more_coverage.py::TestVoiceReply::test_available_backend_synthesises_with_per_thread_overrides`
 - `test/test_slack_handler_more_coverage.py::TestVoiceReply::test_missing_tts_backend_warns_the_opted_in_user`
 - `test/test_slack_handler_more_coverage.py::TestVoiceReply::test_the_availability_probe_runs_off_the_event_loop`
@@ -622,9 +662,16 @@ Notes on the larger groups:
 
 </details>
 
-<details><summary>Set O · <code>test_slack_handler_more_coverage.py</code> · 1 test</summary>
+<details><summary>Set O · <code>test_name_grant_surfaces.py</code> · 1 test (defect)</summary>
+
+- `test/test_name_grant_surfaces.py::TestSlackHandlerSurface::test_refused_grant_downgrades_to_the_interactive_prompt`
+
+</details>
+
+<details><summary>Set O · <code>test_slack_handler_more_coverage.py</code> · 2 tests (1 defect)</summary>
 
 - `test/test_slack_handler_more_coverage.py::TestHandleInteractionAuthReChecks::test_trust_escalation_rejected_when_authorisation_revoked`
+- `test/test_slack_handler_more_coverage.py::TestToolHookVerdicts::test_trusted_session_auto_approves_in_interactive_mode` (defect)
 
 </details>
 
@@ -828,4 +875,4 @@ Notes on the larger groups:
 KC_UPSTREAM_REGRESSION=1 KC_KEEP=1 bash tests/gateway/run.sh   # the two blocks `newly failing:` / `newly passing:` at the end
 ```
 
-`run.sh` prints `!! upstream run did not complete (rc=N)` if either upstream run is cut short, so a crashed run cannot pass for an empty difference. The run takes about 20 minutes. Individual tests that depend on global state should be judged alone (`pytest -n0 <id>`), as above.
+`run.sh` prints `!! upstream run did not complete (rc=N)` if either upstream run is cut short, and then repeats the warning and labels the `newly failing:` and `newly passing:` blocks `UNRELIABLE`, so a crashed run cannot pass for an empty difference. The run takes about 20 minutes. Individual tests that depend on global state should be judged alone (`pytest -n0 <id>`), as above.
