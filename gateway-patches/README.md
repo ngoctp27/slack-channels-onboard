@@ -46,6 +46,7 @@ The app detects every feature at runtime, by the function the gateway exposes
 | Admins (`KIROCREW_ADMIN_USER_IDS`) rank as owner on Slack, except the four primary-owner actions | N1 | fork-only, 0.10.0 |
 | Members ask the owner/admins for edits, commands and GET fetches, only in confined channels | N2 (needs T, N1) | fork-only, 0.10.0 |
 | Members use OPTIONS, acknowledge and stop buttons; a member's approval click gets a public notice | N3 (needs O3, N1) | fork-only, 0.10.0 |
+| Approvals bound to the requester's thread; approver named in the thread; dead buttons answer with an ephemeral | N4 (needs N3, R) | fork-only, 0.10.0 |
 | Agent backend per channel | U | issue kirodotdev/KiroCrew#21910, PR #16200 (open) |
 | (support) | S: `KIROCREW_SLACK_TEAM_ID` in the agent env | PR kirodotdev/KiroCrew#22380, merged after 0.10.0; the set no-ops on a release that carries it |
 
@@ -189,6 +190,29 @@ When a member presses a tool-approval button (allow, deny, trust, or the R3
 so it cannot ping anyone). Nothing resolves and the card stays as it was. Anyone
 else not in the allowlist still gets the ephemeral. N3 does not need N2: without
 a member card the notice just omits the tool name. It needs O3 and N1.
+
+### Set N4: approvals bound to the requester and thread
+
+Without N4 a transport approval click resolves whatever its token names, wherever
+the card is shown. N4 makes the turn's decider record who asked
+(`requester_id`: the sender, or the owner for a trusted-bot message) and the
+thread the card was posted in (`reply_ts`). A click then resolves only when all
+of these hold; otherwise nothing resolves, the click is logged as denied, and the
+presser gets the ephemeral "Không xử lý được nút này: yêu cầu đã được trả lời, đã
+hết hạn, hoặc không thuộc về bạn.":
+
+- a prompt is still waiting at that key and the button's nonce is the current one
+  (if not, the card is also rewritten "This approval already expired.");
+- the decider has a requester;
+- the card sits in the thread the prompt was asked in (a copied card in another
+  thread does nothing; a top-level prompt matches a click with no thread, or one
+  whose thread is the card itself).
+
+When a click does resolve, the bot posts `🔐 <result> — <@approver>` in the thread,
+so the thread shows who decided, an admin approving a member's request included.
+A second owner/admin check sits in the branch just before the decision is read.
+Native approvals (review mode) are not changed. N4 needs N3 and R, and is in the
+`apply.sh` "everything" run only.
 
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.
