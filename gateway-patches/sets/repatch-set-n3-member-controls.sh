@@ -30,6 +30,19 @@
 #        b. OPTIONS actions are refused in a thread Set T marked "owner" (the owner's
 #           unconfined thread), before the card is claimed or rewritten, so a member
 #           cannot use up the owner's question. No Set T, no refusal from this rule.
+#           They are also refused in a thread linked to a dashboard slot.
+#      A member's Kill Now passes the presser's queue scope to stop_turn
+#      (preserve_queue=True, owned_by=<presser's entries>, inside the stop hold), as
+#      mc_stop_confirm does, so it never clears what other people queued.
+#   1b. A member's OPTIONS answer (choice or Send) is NOT run by the stock handlers
+#      (_handle_options / _handle_options_submit call handler.handle_message, the native
+#      path, where Set O's heartbeat-tool defect ends the turn at its first tool call and
+#      the transport gates are skipped). After gate 1 and the channels-governance gate, N3
+#      claims the card once, rewrites it with the choice, posts "<@user>: <choice>" in the
+#      thread and routes the choice through events._route_message, the entry a typed
+#      message takes (what Set T does for a maintainer), so O2 / N2 / T apply. Action
+#      buttons are refused (ephemeral), a stale card is struck through, an empty selection
+#      does nothing. Needs no Set T. Owner and admin presses are unchanged.
 #   2. A member who presses a tool-approval button (mc_tool_approve_*, _deny_*,
 #      _trust_*, mc_tool_kcturn_*) gets a PUBLIC notice in the card's thread
 #      "<@user> không có quyền duyệt yêu cầu này: *tool*" (tool name from the ask-owner
@@ -105,6 +118,39 @@ else:
     copy_old = '"⛔ Chỉ owner mới dùng được các nút này."'
     once(s, copy_old)
     s = s.replace(copy_old, f'"{C5}"')
+
+    # ---- a member's OPTIONS answer: after the channels-governance gate, before the native
+    # handlers (which call handler.handle_message, never the transport path).
+    hook_old = (
+        "    # ── OPTIONS Send button ──\n"
+        "    if action_id == OPTIONS_SUBMIT_ACTION:\n"
+    )
+    hook_new = (
+        f"    if _is_options and not is_owner(user_id) and await _kc_member_options_as_message(payload, user_id):  # Set N3 ({MARK})\n"
+        "        return\n"
+    ) + hook_old
+    once(s, hook_old)
+    s = s.replace(hook_old, hook_new)
+
+    # ---- Kill Now: a member's stop clears only what they queued, and keeps the rest for the successor.
+    kill_old = "    outcome = await _orch.sessions.stop_turn(session_key, force=True, on_hard=_on_hard)\n"
+    kill_new = (
+        "    if is_owner(user_id):\n"
+        "        outcome = await _orch.sessions.stop_turn(session_key, force=True, on_hard=_on_hard)\n"
+        f"    else:  # Set N3 ({MARK}): same queue scope as mc_stop_confirm\n"
+        "        from kiro_crew.slack.events import _entry_owner, slack_stop_in_flight\n"
+        "\n"
+        "        async with slack_stop_in_flight(_orch, session_key):\n"
+        "            outcome = await _orch.sessions.stop_turn(\n"
+        "                session_key,\n"
+        "                force=True,\n"
+        "                preserve_queue=True,\n"
+        "                owned_by=entries_queued_by(_entry_owner(user_id, channel)),\n"
+        "                on_hard=_on_hard,\n"
+        "            )\n"
+    )
+    once(s, kill_old)
+    s = s.replace(kill_old, kill_new)
 
     tail = '''
 
@@ -208,7 +254,16 @@ def _kc_kill_now_ok(payload: dict, action: dict, user_id: str) -> bool:
 
 
 def _kc_options_thread_ok(payload: dict) -> bool:
-    """False for an OPTIONS action in a thread Set T opened for the owner (members cannot answer there)."""
+    """False for an OPTIONS action in a dashboard-linked thread, or in a thread Set T opened for the owner."""
+    msg = payload.get("message") or {}
+    channel = (payload.get("channel") or {}).get("id", "")
+    thread_ts = msg.get("thread_ts") or msg.get("ts") or ""
+    try:
+        dash = getattr(_orch, "dashboard_state", None)
+        if dash is not None and thread_ts and dash.get_linked_slot(thread_ts):
+            return False  # a linked dashboard thread stays primary-owner only
+    except Exception:
+        return False
     try:
         from kiro_crew import _kc_confine as _kc_cf
 
@@ -218,9 +273,6 @@ def _kc_options_thread_ok(payload: dict) -> bool:
     if thread_mode is None:
         return True
     try:
-        msg = payload.get("message") or {}
-        channel = (payload.get("channel") or {}).get("id", "")
-        thread_ts = msg.get("thread_ts") or msg.get("ts") or ""
         return bool(channel and thread_ts) and thread_mode(channel, thread_ts) != "owner"
     except Exception:
         return False
@@ -292,6 +344,128 @@ async def _kc_member_approval_notice(payload: dict, user_id: str) -> bool:
         except Exception:
             logger.debug("Set N3: approval notice failed", exc_info=True)
     return True
+
+
+def _kc_options_clean(text: str) -> str:
+    """The redaction the stock OPTIONS handlers apply to an LLM-written choice before it is used."""
+    return redact_credentials(redact_exfiltration_urls(text)[0])[0]
+
+
+async def _kc_member_options_as_message(payload: dict, user_id: str) -> bool:
+    """A member's OPTIONS answer becomes a typed message in the thread (the transport path).
+
+    The stock handlers (_handle_options, _handle_options_submit) re-dispatch the answer with
+    handler.handle_message, the native path: a member's tool request there ends in Set O's
+    heartbeat-tool error, and it skips the transport gates (Set O2, N2, T). Here the answer is
+    posted as "<@user>: text" in the card's thread and fed through events._route_message, the
+    entry a typed message takes, exactly as Set T does for a maintainer. Called for a presser who
+    is not the owner or an admin, after gate 1 (so a refused thread never reaches it) and after the
+    channels-governance gate. Always True for such a press: it is handled here, never by the
+    native handlers. Needs no other Set.
+    """
+    if not (_orch and _orch.slack):
+        return True
+    channel = (payload.get("channel") or {}).get("id", "")
+    msg = payload.get("message") or {}
+    msg_ts = msg.get("ts", "")
+    thread_ts = msg.get("thread_ts") or msg_ts
+    actions = payload.get("actions") or []
+    action = actions[0] if len(actions) == 1 and isinstance(actions[0], dict) else {}
+    aid = str(action.get("action_id") or "")
+    blocks = msg.get("blocks") or []
+    is_submit = aid == OPTIONS_SUBMIT_ACTION
+    choice = str(action.get("value") or (action.get("selected_option") or {}).get("value") or "")
+    if not (channel and msg_ts) or not (is_submit or aid.startswith(OPTIONS_ACTION_PREFIX)) or choice.startswith("action::"):
+        # An action button is context for the session, not an answer; nothing here may run it.
+        if channel and user_id:
+            try:
+                await _orch.slack.post_ephemeral(channel, user_id, "⛔ Chỉ owner/admin mới dùng được các nút này.")
+            except Exception:
+                logger.debug("Set N3: ephemeral failed", exc_info=True)
+        return True
+    dash = getattr(_orch, "dashboard_state", None)
+    if await options_control_is_stale(dash, _options_block_id(payload, action), thread_ts):
+        await _refuse_stale_options(channel, msg_ts, payload)
+        return True
+    if is_submit:
+        picked: list[str] = []
+        for block_vals in ((payload.get("state") or {}).get("values") or {}).values():
+            cb_state = block_vals.get(OPTIONS_CHECKBOXES_ACTION)
+            if cb_state:
+                picked = [str(o.get("value") or "") for o in cb_state.get("selected_options") or []]
+                break
+        all_choices: list[str] = []
+        for b in blocks:
+            for el in (b.get("elements") or []) if b.get("type") == "actions" else []:
+                if el.get("action_id") == OPTIONS_CHECKBOXES_ACTION:
+                    all_choices = [str(o.get("value") or "") for o in el.get("options") or []]
+        chosen = set(picked)
+        index: Any = [i for i, c in enumerate(all_choices) if c in chosen]
+    else:
+        picked = [choice]
+        all_choices = [
+            str(el.get("value") or "")
+            for b in blocks
+            if b.get("type") == "actions"
+            for el in b.get("elements") or []
+            if str(el.get("action_id") or "").startswith(OPTIONS_ACTION_PREFIX)
+        ]
+        try:
+            index = int(aid[len(OPTIONS_ACTION_PREFIX) :])
+        except ValueError:
+            index = 0
+    picked = [_kc_options_clean(p) for p in picked if p]
+    if not picked:
+        return True  # nothing chosen: nothing to answer
+    all_choices = [_kc_options_clean(c) for c in all_choices]
+    text = ", ".join(picked)
+    shown = escape_mrkdwn(text)  # Slack parses entities in message text, so a choice must not ping
+    async with options_edit_lock(channel, msg_ts):
+        if not claim_options_answer(channel, msg_ts):
+            return True  # already answered: swallow the duplicate click
+        owner_keys: tuple[str, ...] = ()
+        try:
+            owner_keys = slack_options_owner_keys_snapshot(dash, thread_ts)
+        except Exception:
+            logger.debug("Set N3: could not snapshot OPTIONS owner keys", exc_info=True)
+        edited = False
+        try:
+            new_blocks = replace_options_blocks(blocks, build_options_selected_blocks(all_choices, index))
+            await _orch.slack.update_message(channel, msg_ts, text=shown, blocks=new_blocks)
+            edited = True
+        except Exception:
+            # The claim stays: the answer is still posted below, and a retry must not answer twice.
+            logger.debug("Set N3: could not rewrite the OPTIONS card", exc_info=True)
+        if edited:
+            settle_options_answer(channel, msg_ts)
+            _forget_options_control(thread_ts, msg_ts, keys=owner_keys)
+    new_ts = await _orch.slack.post_message(channel, f"<@{user_id}>: {shown}", thread_ts)
+    if not new_ts:
+        logger.warning("Set N3: could not post the OPTIONS answer of %s", user_id)
+        return True
+    from kiro_crew.slack.events import SeenCache, _route_message
+
+    sel().log_tool_invocation(
+        session_key=thread_ts,
+        agent="kirocrew",
+        source="slack",
+        tool_name="options_submit" if is_submit else "options",
+        tool_kind="interaction",
+        outcome="success",
+        metadata={"selected": text, "channel": channel, "route": "typed message (Set N3)"},
+    )
+    logger.info("Set N3: member %s OPTIONS answer in %s routed as a typed message", user_id, channel)
+    event = {
+        "type": "message",
+        "user": user_id,
+        "channel": channel,
+        "text": text,
+        "thread_ts": thread_ts,
+        "ts": new_ts,
+        "team": (payload.get("team") or {}).get("id", ""),
+    }
+    await _route_message(_orch, event, SeenCache(), is_mention=True)
+    return True
 '''
     plans.append((site / REL, s + tail))
 
@@ -308,8 +482,10 @@ import importlib
 import inspect
 
 I = importlib.import_module("kiro_crew.slack.interactions")
-for name in ("_kc_member_control_ok", "_kc_kill_now_ok", "_kc_options_thread_ok", "_kc_approval_tool_label", "_kc_member_approval_notice"):
+for name in ("_kc_member_control_ok", "_kc_kill_now_ok", "_kc_options_thread_ok", "_kc_approval_tool_label", "_kc_member_approval_notice", "_kc_member_options_as_message"):
     assert hasattr(I, name), name
 assert "_kc_member_approval_notice(payload, _kc_uid)" in inspect.getsource(I.dispatch)
+assert "_kc_member_options_as_message(payload, user_id)" in inspect.getsource(I.dispatch)
+assert "preserve_queue=True" in inspect.getsource(I._handle_stop_kill_now)
 print("Set N3: OK (imports + names verified)")
 PY

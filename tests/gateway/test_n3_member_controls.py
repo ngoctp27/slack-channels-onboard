@@ -1,8 +1,10 @@
 """Set N3: members use OPTIONS, acknowledge and stop buttons; an approval click gets a public notice."""
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
+import itertools
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -52,14 +54,6 @@ def spy(monkeypatch):
 
     monkeypatch.setattr(SlackApprovalDecider, "resolve_global", classmethod(_resolve))
     return SimpleNamespace(calls=calls)
-
-
-def test_member_options_submit_reaches_handler(orch, fake_slack, monkeypatch):
-    rec = AsyncMock()
-    monkeypatch.setattr(interactions, "_handle_options_submit", rec)
-    asyncio.run(interactions.dispatch(payload("U0MEMBER", "options_submit")))
-    rec.assert_awaited_once()
-    assert fake_slack.ephemerals == []
 
 
 def test_member_stop_and_ack_pass_gate():
@@ -131,6 +125,15 @@ class FakeSessions:
         self.stops.append((key, kw))
         return "hard"
 
+    def dequeue(self, key):  # the drain that closes a stop hold finds nothing queued
+        return None
+
+
+class Orch(SimpleNamespace):
+    """Hashable: the stop hold keys a WeakKeyDictionary by the orchestrator."""
+
+    __hash__ = object.__hash__
+
 
 class Gate:
     """A Slack double whose first awaited call blocks, parking a real handler coroutine."""
@@ -150,7 +153,7 @@ def sess_orch(monkeypatch, fake_slack):
         return True
 
     sessions = FakeSessions()
-    o = SimpleNamespace(slack=fake_slack, sessions=sessions, _session_tasks={}, dashboard_state=None)
+    o = Orch(slack=fake_slack, sessions=sessions, _session_tasks={}, _pending_queue={}, _handler_tasks=set(), dashboard_state=None)
     monkeypatch.setattr(interactions, "_orch", o)
     monkeypatch.setattr(interactions, "channel_inbound_permitted", _permitted)
     return o
@@ -300,6 +303,56 @@ def test_owner_and_admin_kill_now_on_anothers_turn_unchanged(sess_orch, fake_sla
     assert fake_slack.ephemerals == []
 
 
+def test_member_kill_now_is_scoped_to_the_presser_queue(sess_orch, fake_slack):
+    """Kill Now must not clear what other people queued in the same thread."""
+
+    async def main():
+        task, gate = await park_queued("U0MEMBER")
+        sess_orch._session_tasks[THREAD] = task
+        await interactions.dispatch(kill_payload("U0MEMBER", THREAD))
+        await unpark((task, gate))
+
+    asyncio.run(main())
+    (key, kw), = sess_orch.sessions.stops
+    assert key == THREAD and kw["force"] is True and kw["preserve_queue"] is True
+    mine, theirs = events._queue_tags("U0MEMBER", "C0CHAN"), events._queue_tags("U0OTHER", "C0CHAN")
+    assert kw["owned_by"](mine) and not kw["owned_by"](theirs) and not kw["owned_by"]({})
+
+
+def test_member_kill_now_holds_the_drain_while_it_stops(sess_orch, fake_slack, monkeypatch):
+    held = []
+    real = events.slack_stop_in_flight
+
+    @contextlib.asynccontextmanager
+    async def spy_hold(orch, key):
+        held.append(key)
+        async with real(orch, key):
+            yield
+
+    monkeypatch.setattr(events, "slack_stop_in_flight", spy_hold)
+
+    async def main():
+        task, gate = await park_queued("U0MEMBER")
+        sess_orch._session_tasks[THREAD] = task
+        await interactions.dispatch(kill_payload("U0MEMBER", CANON))
+        await unpark((task, gate))
+
+    asyncio.run(main())
+    assert held == [CANON] and [k for k, _ in sess_orch.sessions.stops] == [CANON]
+
+
+def test_owner_kill_now_keeps_the_whole_queue_clear(sess_orch, fake_slack):
+    async def main():
+        task, gate = await park_queued("U0MEMBER")
+        sess_orch._session_tasks[THREAD] = task
+        await interactions.dispatch(kill_payload("U0OWNER", THREAD))
+        await unpark((task, gate))
+
+    asyncio.run(main())
+    (_, kw), = sess_orch.sessions.stops
+    assert kw["force"] is True and "owned_by" not in kw and "preserve_queue" not in kw
+
+
 def test_stranger_kill_now_is_refused(sess_orch, fake_slack):
     async def main():
         task, gate = await park_queued("U0OTHER")
@@ -340,49 +393,200 @@ def opt_payload(uid, *action_ids, thread_ts="1.0"):
     return p
 
 
-@pytest.mark.parametrize(
-    "action, handler, extra",
-    [
-        ("options_submit", "_handle_options_submit", ()),
-        ("options_choice_1", "_handle_options", ()),
-        ("options_checkboxes", "_handle_options", ()),
-    ],
-)
-def test_member_options_in_owner_mode_thread_is_refused(orch, fake_slack, monkeypatch, threads, action, handler, extra):
+_msg_ts = itertools.count(1)
+
+
+@pytest.fixture
+def opts(orch, fake_slack, monkeypatch):
+    """A member OPTIONS click, with the transport route and the native handler both spied.
+
+    ``orch`` is the interactions module's gateway double; its Slack gets a post_message that returns
+    a ts (the real client does), and `events._route_message` records what would have been routed.
+    """
+    routed = []
+
+    async def _route(o, event, seen, is_mention=False, from_trusted_bot=False):
+        routed.append(SimpleNamespace(event=event, is_mention=is_mention, from_trusted_bot=from_trusted_bot))
+
+    async def _post(channel, text, thread_ts=None, **kw):
+        fake_slack.posts.append((channel, text, thread_ts))
+        return "9.0"
+
+    native = AsyncMock()
+    monkeypatch.setattr(events, "_route_message", _route)
+    monkeypatch.setattr(fake_slack, "post_message", _post)
+    for name in ("handle_message", "_handle_options", "_handle_options_submit", "_route_action_to_session"):
+        monkeypatch.setattr(interactions, name, native)
+    return SimpleNamespace(routed=routed, native=native, slack=fake_slack)
+
+
+def card_payload(uid, kind="choice", *, thread_ts="1.0", value="Yes", selected=("A", "B"), msg_ts=None):
+    """A click on an OPTIONS card: one choice button, or the checkboxes' Send button."""
+    msg_ts = msg_ts or f"2.{next(_msg_ts):06d}"
+    if kind == "choice":
+        elements = [
+            {"action_id": "options_choice_0", "value": "No"},
+            {"action_id": "options_choice_1", "value": value},
+        ]
+        actions, state = [{"action_id": "options_choice_1", "value": value, "block_id": "b1"}], {}
+    else:
+        options = [{"value": v, "text": {"type": "plain_text", "text": v}} for v in ("A", "B", "C")]
+        elements = [{"action_id": "options_checkboxes", "options": options}]
+        picked = [{"value": v} for v in selected]
+        actions = [{"action_id": "options_submit", "block_id": "b1"}]
+        state = {"values": {"b1": {"options_checkboxes": {"selected_options": picked}}}}
+    return {
+        "type": "block_actions",
+        "user": {"id": uid},
+        "channel": {"id": "C0CHAN"},
+        "team": {"id": "T0TEAM"},
+        "message": {"ts": msg_ts, "thread_ts": thread_ts, "blocks": [{"type": "actions", "elements": elements}]},
+        "actions": actions,
+        "state": state,
+    }
+
+
+@pytest.mark.parametrize("kind, text", [("choice", "Yes"), ("submit", "A, B")])
+def test_member_options_answer_goes_through_the_transport_route(opts, kind, text):
+    p = card_payload("U0MEMBER", kind)
+    msg_ts = p["message"]["ts"]
+    asyncio.run(interactions.dispatch(p))
+    (r,) = opts.routed
+    ev = r.event
+    assert (ev["user"], ev["channel"], ev["text"], ev["thread_ts"], ev["ts"]) == ("U0MEMBER", "C0CHAN", text, "1.0", "9.0")
+    assert r.is_mention and not r.from_trusted_bot
+    opts.native.assert_not_awaited()  # never the native handler, where the Set O defect ends the turn
+    assert opts.slack.ephemerals == []
+    assert [(c, ts) for c, ts, _ in opts.slack.updates] == [("C0CHAN", msg_ts)]  # the card is rewritten once
+    assert opts.slack.posts == [("C0CHAN", f"<@U0MEMBER>: {text}", "1.0")]
+
+
+def test_member_options_card_is_claimed_once(opts):
+    p = card_payload("U0MEMBER")
+    asyncio.run(interactions.dispatch(p))
+    asyncio.run(interactions.dispatch(p))  # a double click on the same card
+    assert len(opts.routed) == 1 and len(opts.slack.updates) == 1 and len(opts.slack.posts) == 1
+    opts.native.assert_not_awaited()
+
+
+def test_member_options_choice_cannot_ping_the_channel(opts):
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER", value="<!channel> go")))
+    (_, posted, _), = opts.slack.posts
+    assert "<!channel>" not in posted and "&lt;!channel&gt;" in posted
+    assert all("<!channel>" not in text for _, _, text in opts.slack.updates)
+    assert opts.routed[0].event["text"] == "<!channel> go"  # the agent still gets what was picked
+
+
+def test_member_options_empty_submit_does_nothing(opts):
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER", "submit", selected=())))
+    assert opts.routed == [] and opts.slack.updates == [] and opts.slack.posts == [] and opts.slack.ephemerals == []
+    opts.native.assert_not_awaited()
+
+
+def test_member_options_action_buttons_are_refused_not_routed(opts):
+    p = card_payload("U0MEMBER", value="action::{}")
+    asyncio.run(interactions.dispatch(p))
+    assert opts.routed == [] and opts.slack.updates == [] and opts.slack.posts == []
+    assert opts.slack.ephemerals == [("C0CHAN", "U0MEMBER", C5)]
+    opts.native.assert_not_awaited()
+
+
+def test_member_options_in_a_linked_dashboard_thread_is_refused(opts, orch, monkeypatch):
+    seen = []
+    interactions._orch.dashboard_state = SimpleNamespace(get_linked_slot=lambda t: seen.append(t) or object())
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER")))
+    assert seen and opts.routed == [] and opts.slack.updates == []
+    assert opts.slack.ephemerals == [("C0CHAN", "U0MEMBER", C5)]
+    opts.native.assert_not_awaited()
+
+
+def test_member_options_stale_card_is_struck_through_not_routed(opts, monkeypatch):
+    stale = AsyncMock()
+
+    async def _stale(*a):
+        return True
+
+    monkeypatch.setattr(interactions, "options_control_is_stale", _stale)
+    monkeypatch.setattr(interactions, "_refuse_stale_options", stale)
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER")))
+    stale.assert_awaited_once()
+    assert opts.routed == [] and opts.slack.updates == [] and opts.slack.posts == []
+
+
+def test_member_options_denied_by_channel_governance_is_dropped(opts, monkeypatch):
+    async def _denied(*a, **k):
+        return False
+
+    monkeypatch.setattr(interactions, "channel_inbound_permitted", _denied)
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER")))
+    assert opts.routed == [] and opts.slack.updates == [] and opts.native.await_count == 0
+
+
+def test_member_options_failing_card_rewrite_still_answers_once(opts, monkeypatch):
+    async def _boom(*a, **k):
+        raise RuntimeError("slack down")
+
+    monkeypatch.setattr(opts.slack, "update_message", _boom)
+    p = card_payload("U0MEMBER")
+    asyncio.run(interactions.dispatch(p))
+    asyncio.run(interactions.dispatch(p))
+    assert len(opts.routed) == 1  # the claim holds, so a retry cannot answer twice
+
+
+def test_stranger_options_click_is_refused(opts):
+    asyncio.run(interactions.dispatch(card_payload("U0OTHER")))  # not in the allowlist
+    assert opts.routed == [] and opts.slack.updates == []
+    assert opts.slack.ephemerals == [("C0CHAN", "U0OTHER", C5)]
+
+
+@pytest.mark.parametrize("who", ["U0OWNER", "U0ADMIN1"])
+@pytest.mark.parametrize("kind, handler", [("choice", "_handle_options"), ("submit", "_handle_options_submit")])
+def test_owner_and_admin_options_stay_on_the_native_path(opts, monkeypatch, who, kind, handler):
+    monkeypatch.setenv("KIROCREW_ADMIN_USER_IDS", "U0ADMIN1")
+    asyncio.run(interactions.dispatch(card_payload(who, kind)))
+    opts.native.assert_awaited_once()
+    assert opts.routed == [] and opts.slack.updates == []
+
+
+# OPTIONS in a thread Set T opened for the owner ------------------------------
+@pytest.mark.parametrize("action", ["options_submit", "options_choice_1", "options_checkboxes"])
+def test_member_options_in_owner_mode_thread_is_refused(opts, monkeypatch, threads, action):
     threads("1.0", owner=True)
-    rec = AsyncMock()
-    monkeypatch.setattr(interactions, handler, rec)
     claimed = []
     monkeypatch.setattr(interactions, "claim_options_answer", lambda *a: claimed.append(a) or True)
     asyncio.run(interactions.dispatch(opt_payload("U0MEMBER", action)))
-    rec.assert_not_awaited()
-    assert claimed == [] and fake_slack.updates == [] and fake_slack.posts == []
-    assert fake_slack.ephemerals == [("C0CHAN", "U0MEMBER", C5)]
+    opts.native.assert_not_awaited()
+    assert opts.routed == [] and claimed == []  # refused before the card is claimed
+    assert opts.slack.updates == [] and opts.slack.posts == []
+    assert opts.slack.ephemerals == [("C0CHAN", "U0MEMBER", C5)]
 
 
-def test_member_options_in_shared_or_unrecorded_thread_reaches_handler(orch, fake_slack, monkeypatch, threads):
-    rec = AsyncMock()
-    monkeypatch.setattr(interactions, "_handle_options_submit", rec)
+def test_member_options_in_shared_or_unrecorded_thread_is_routed(opts, threads):
     threads("1.0", owner=False)  # opened by a non-owner: shared
-    asyncio.run(interactions.dispatch(opt_payload("U0MEMBER", "options_submit", thread_ts="1.0")))
-    asyncio.run(interactions.dispatch(opt_payload("U0MEMBER", "options_submit", thread_ts="9.9")))  # never seen
-    assert rec.await_count == 2 and fake_slack.ephemerals == []
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER", thread_ts="1.0")))
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER", thread_ts="9.9")))  # never seen
+    assert [r.event["thread_ts"] for r in opts.routed] == ["1.0", "9.9"]
+    assert opts.slack.ephemerals == [] and opts.native.await_count == 0
 
 
-def test_owner_options_in_owner_mode_thread_unchanged(orch, fake_slack, monkeypatch, threads):
+def test_owner_options_in_owner_mode_thread_unchanged(opts, threads):
     threads("1.0", owner=True)
-    rec = AsyncMock()
-    monkeypatch.setattr(interactions, "_handle_options_submit", rec)
     asyncio.run(interactions.dispatch(opt_payload("U0OWNER", "options_submit")))
-    rec.assert_awaited_once()
+    opts.native.assert_awaited_once()
+    assert opts.routed == []
 
 
-def test_options_rule_is_skipped_when_set_t_thread_api_is_absent(orch, fake_slack, monkeypatch):
+def test_options_rule_is_skipped_when_set_t_thread_api_is_absent(opts, monkeypatch):
     monkeypatch.setitem(sys.modules, "kiro_crew._kc_confine", None)  # import fails
-    rec = AsyncMock()
-    monkeypatch.setattr(interactions, "_handle_options_submit", rec)
-    asyncio.run(interactions.dispatch(opt_payload("U0MEMBER", "options_submit")))
-    rec.assert_awaited_once()
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER")))
+    assert len(opts.routed) == 1 and opts.slack.ephemerals == []
+
+
+def test_options_conversion_does_not_need_set_t(opts, monkeypatch):
+    """The combo without Set T has no _kc_confine at all: the member answer is still routed."""
+    monkeypatch.setitem(sys.modules, "kiro_crew._kc_confine", None)
+    asyncio.run(interactions.dispatch(card_payload("U0MEMBER", "submit")))
+    assert [r.event["text"] for r in opts.routed] == ["A, B"]
 
 
 def test_ack_and_stop_buttons_are_not_subject_to_the_options_rule(orch, fake_slack, threads):
