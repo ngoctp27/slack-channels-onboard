@@ -67,9 +67,23 @@ run_upstream() {
   else
     targets="$(cd "$WORK/kirocrew" && grep -rl --include='test_*.py' 'kiro_crew\.slack' test | LC_ALL=C sort | tr '\n' ' ')"
   fi
+  # pytest exits 0 (all passed) or 1 (some failed). Anything else (2 interrupted or collection
+  # error, 3 internal error, 4 usage, 5 no tests) means the run did not finish, and an empty
+  # failure list would then look like "nothing changed".
+  local rc=0
   # shellcheck disable=SC2086
-  (cd "$WORK/kirocrew" && "$PY" -m pytest $targets -q -p no:cacheprovider -n auto -rfE --color=no >"$log" 2>&1) || true
-  grep -E '^(FAILED|ERROR) [^ ]+\.py' "$log" | sed -E 's/^(FAILED|ERROR) ([^ ]+).*/\1 \2/' | LC_ALL=C sort -u >"$out" || true
+  (cd "$WORK/kirocrew" && "$PY" -m pytest $targets -q -p no:cacheprovider -n auto -rfE --color=no >"$log" 2>&1) || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "!! upstream run did not complete (rc=$rc), see $log"
+  fi
+  echo "   pytest: $(grep -E '^[=]* *[0-9]+ (passed|failed|error|skipped)|no tests ran' "$log" | tail -n 1 || true)"
+  # A parametrized id can contain spaces, so cut at the " - <message>" separator, not at the first space.
+  { grep -E '^(FAILED|ERROR) [^ ]+\.py' "$log" || true; } | "$PY" -c '
+import sys
+for line in sys.stdin:
+    kind, _, rest = line.rstrip("\n").partition(" ")
+    print(kind, rest.partition(" - ")[0])
+' | LC_ALL=C sort -u >"$out"
 }
 
 if [ -n "$KC_UPSTREAM_REGRESSION" ]; then

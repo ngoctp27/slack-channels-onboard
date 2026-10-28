@@ -223,6 +223,58 @@ strict approval gate applies. Set T mounts a fixed list of toolchain
 directories from your home read-only into the sandbox (`HOME_ALLOW_RO` in
 `sets/patch-src/kc_confine.py`); add yours there if an agent cannot find a tool.
 
+## Verify on Slack
+
+Run this on a real gateway after `apply.sh` (all sets, 0.10.0). The sets are
+tested by unit tests and by Kiro Crew's own suite (see
+[`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md)), but only a live workspace shows
+the cards and notices a person sees.
+
+Set-up:
+
+- The gateway runs on Linux with `bwrap` installed, and
+  `KIROCREW_ADMIN_USER_IDS` lists at least one admin.
+- One channel has `"confine": true` in its `channel-roles.json` entry (or has a
+  maintainer), and one channel has no sandbox.
+- You need the owner, an admin, a member in `slack.allowed_users`, and a person
+  who is only in an open channel.
+
+Checks (the quoted texts are what Slack shows, in Vietnamese):
+
+1. The admin sends a prompt and approves the tool request of their own turn.
+2. A member asks for an Edit in the sandboxed channel. The card mentions the
+   owner and the admin and has three buttons (allow once, allow for this turn,
+   deny).
+3. The member presses "Cho phép 1 lần". The thread gets
+   `🔐 ⛔ <@member> không có quyền duyệt yêu cầu này: *Edit*` and
+   `Chỉ owner/admin duyệt được tool approval.` The card is unchanged.
+4. The admin presses the button. The tool runs and the thread shows
+   `🔐 <result> — <@admin>`.
+5. "Cho phép cả lượt này": later write requests in the same turn do not ask again.
+6. A member asks for an Edit in the channel without a sandbox. The request is
+   denied and no card appears.
+7. A member fetches an `https` URL with GET. A card appears and shows the URL. A
+   fetch with POST, or a fetch of `http://169.254.169.254`, is denied and no card
+   appears.
+8. A member triggers `spawn_run` or creates a cron job. It is denied and no card
+   appears.
+9. A person who is only in the channel through the open channel asks for an Edit.
+   It is denied and no card appears.
+10. A member presses an OPTIONS answer and types `!stop`. Both work.
+11. The admin types `/kirocrew yolo on` and gets
+    `⛔ Chỉ owner chính dùng được lệnh này.` The admin types
+    `/kirocrew yolo off` and it works.
+12. The admin and a member each type `/kirocrew dashboard` or `!dashboard` and
+    get `❌ Failed to send dashboard link.` No DM is sent. The primary owner still
+    gets the link.
+13. The admin writes in a linked dashboard thread. The message does not reach the
+    dashboard session, and the thread shows `⛔ Chỉ owner chính dùng được lệnh
+    này.` The "Link to Dashboard" button is refused for the admin the same way.
+14. Leave a member's card unanswered for more than 600 seconds. Press a button on
+    it: the card becomes `⏱ This approval already expired.` and the presser gets
+    `⚠️ Không xử lý được nút này: yêu cầu đã được trả lời, đã hết hạn, hoặc không thuộc về bạn.`
+    A later attempt in the same turn is denied.
+
 ## Undo
 
 Every edited file has a `*.bak-set<x>-<stamp>` copy next to it: restore those,
@@ -230,8 +282,17 @@ delete `kiro_crew/_kc_confine.py` and `kiro_crew/slack/team_ids.py` if present,
 clear `__pycache__`, restart. Or reinstall the package
 (`pipx reinstall kirocrew`), which drops every set at once.
 
+Sets `n1` to `n4` write `*.bak-setn1-<stamp>` to `*.bak-setn4-<stamp>`. To drop
+only them, restore those copies in the order `n4`, `n3`, `n2`, `n1` (each later
+set anchors on text the earlier ones wrote), then clear `__pycache__`. `n2` and
+`n3` depend on `n1`, and `n4` on `n3`, so restoring `n1` alone is not enough.
+
 ## Tested
 
 CI applies every combination above, twice, to pristine `v0.9.0` and `v0.10.0`
 trees, and the full set runs on a live 0.10.0 gateway. Not tested on other
 versions or on Windows.
+
+Kiro Crew's own Slack test files were run on a pristine and on a fully patched
+`v0.10.0` tree; every test that changed result is listed and traced to the set
+that causes it in [`REGRESSION-v0.10.0.md`](REGRESSION-v0.10.0.md).
