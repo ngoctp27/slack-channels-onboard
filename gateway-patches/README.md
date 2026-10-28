@@ -162,13 +162,33 @@ action in the press is one of them:
 - the cron and subagent *acknowledge* buttons;
 - the stop buttons (`mc_stop_confirm`, `mc_stop_cancel`, `stop_kill_now`).
 
+Two of these are limited to the member's own work. A refused press gets the
+ephemeral "Chỉ owner/admin mới dùng được các nút này." and nothing runs.
+
+- **Kill Now** (`stop_kill_now`, which hard-resets a session) works for a member
+  only on a plain Slack session, and only while the turn running in it was
+  started by that member. A dashboard session is refused: a `dashboard:` key, or
+  a thread that a dashboard slot owns or is linked to. Kiro Crew 0.10.0 does not
+  record who started a running turn, so N3 reads it from the coroutine that runs
+  the turn (the `user_id` of `handle_message_transport` / `handle_message`, or the
+  queued entry's `sender_id`), found through the session's turn holder or the
+  router's task for the thread. If that cannot be read, the press is refused.
+  The owner and admins are not limited.
+- **OPTIONS** (the choice buttons, the checkboxes and *Send*) are refused for a
+  member in a thread that Set T marked as the owner's (the unconfined thread only
+  the owner may post in). Without this, the press would use up the owner's
+  question card before Set T refused the member's message. It needs Set T's thread
+  record; with no Set T the rule does nothing. In any other thread a member can
+  answer a card. 0.10.0 does not record whose turn produced a card, so a member
+  can answer a card another member's turn produced.
+
 A member's OPTIONS answer still cannot enter a linked dashboard thread (Set N1).
 When a member presses a tool-approval button (allow, deny, trust, or the R3
 "whole turn" button), the bot posts a public notice in the card's thread
-(`<@user> không có quyền duyệt yêu cầu này: *tool*`). Nothing resolves and the
-card stays as it was. Anyone else not in the allowlist still gets the ephemeral
-"Chỉ owner/admin mới dùng được các nút này.". N3 does not need N2: without a
-member card the notice just omits the tool name. It needs O3 and N1.
+(`<@user> không có quyền duyệt yêu cầu này: *tool*`, with the tool name escaped
+so it cannot ping anyone). Nothing resolves and the card stays as it was. Anyone
+else not in the allowlist still gets the ephemeral. N3 does not need N2: without
+a member card the notice just omits the tool name. It needs O3 and N1.
 
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.

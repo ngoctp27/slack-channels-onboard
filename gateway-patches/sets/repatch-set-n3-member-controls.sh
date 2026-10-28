@@ -17,11 +17,25 @@
 #      options_submit), a cron_ack_* / subagent_ack_* acknowledgement, or a stop
 #      control (mc_stop_confirm, mc_stop_cancel, stop_kill_now). One other action in
 #      the payload, another payload type or a stranger: still dropped by O3.
+#      Two of those are scoped to the member's own work (the member gets the same
+#      ephemeral as before, and nothing runs):
+#        a. stop_kill_now (Kill Now hard-resets a session) passes only when the target
+#           session is a plain Slack session (a bare thread ts or a slack:* key, whose
+#           thread no dashboard slot owns or is linked to) AND the turn running in it
+#           was started by the presser. 0.10.0 keeps no requester field, so the
+#           requester is read from the coroutine that runs the turn
+#           (handle_message_transport / handle_message: user_id; _dispatch_queued:
+#           kwargs["sender_id"]), found through session.turn_owner, else
+#           orch._session_tasks. Anything it cannot read means refused.
+#        b. OPTIONS actions are refused in a thread Set T marked "owner" (the owner's
+#           unconfined thread), before the card is claimed or rewritten, so a member
+#           cannot use up the owner's question. No Set T, no refusal from this rule.
 #   2. A member who presses a tool-approval button (mc_tool_approve_*, _deny_*,
 #      _trust_*, mc_tool_kcturn_*) gets a PUBLIC notice in the card's thread
 #      "<@user> không có quyền duyệt yêu cầu này: *tool*" (tool name from the ask-owner
-#      registry of Set N2 when it is there). Nothing resolves, the card stays as it is,
-#      and the click is logged as denied (admin_only).
+#      registry of Set N2 when it is there, with mrkdwn and entity characters escaped).
+#      Nothing resolves, the card stays as it is, and the click is logged as denied
+#      (admin_only).
 #   3. The ephemeral of gate 1 now reads "Chỉ owner/admin mới dùng được các nút này."
 #   Gate 2 (the allowed-user check), the keyword gates and the slash-command gates of
 #   O3 are untouched. The handlers behind the buttons take the same payload they take
@@ -119,20 +133,116 @@ _KC_APPROVAL_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _kc_member_action_ids(payload: dict, user_id: str) -> list[str]:
-    """Action ids of a block_actions payload from an allowlisted user; [] for anything else."""
+def _kc_member_actions(payload: dict, user_id: str) -> list[dict]:
+    """Actions of a block_actions payload from an allowlisted user; [] for anything else."""
     if payload.get("type") != "block_actions" or not is_allowed_user(user_id):
         return []
-    ids = [str((a or {}).get("action_id", "")) for a in (payload.get("actions") or [])]
-    return ids if ids else []
+    return [a or {} for a in (payload.get("actions") or [])]
+
+
+def _kc_member_action_ids(payload: dict, user_id: str) -> list[str]:
+    """Action ids of a block_actions payload from an allowlisted user; [] for anything else."""
+    return [str(a.get("action_id", "")) for a in _kc_member_actions(payload, user_id)]
+
+
+def _kc_task_requester(task) -> str:
+    """Slack user whose message the turn task *task* runs, read from its live coroutine; "" if unknown.
+
+    0.10.0 records no requester of a running turn, only the queue tags of waiting entries. The
+    turn's coroutine still holds it: handle_message_transport / handle_message take user_id, and
+    _dispatch_queued (a turn started from the queue) carries it as kwargs["sender_id"].
+    """
+    try:
+        coro = task.get_coro()
+        frame = coro.cr_frame
+        name, local = frame.f_code.co_name, frame.f_locals
+        if name in ("handle_message_transport", "handle_message"):
+            who = local.get("user_id")
+        elif name == "_dispatch_queued":
+            who = (local.get("kwargs") or {}).get("sender_id")
+        else:
+            return ""
+        return who if isinstance(who, str) else ""
+    except Exception:
+        return ""
+
+
+def _kc_running_turn_requester(session_key: str) -> str:
+    """Slack user who started the turn now running in *session_key*; "" when nothing is running or unreadable."""
+    try:
+        from kiro_crew.messaging.link import legacy_key
+
+        sessions = _orch.sessions
+        # The task holding the session's turn permit is the running turn; before it holds the
+        # permit, the task the router registered for the key is.
+        task = getattr(sessions._sessions.get(sessions._fold_key(session_key)), "turn_owner", None)
+        if task is None:
+            task = _orch._session_tasks.get(legacy_key(session_key) or session_key)
+        return _kc_task_requester(task) if task is not None else ""
+    except Exception:
+        return ""
+
+
+def _kc_kill_now_ok(payload: dict, action: dict, user_id: str) -> bool:
+    """A member may Kill Now only a plain Slack session whose running turn they started. Fail closed."""
+    try:
+        from kiro_crew.messaging.link import is_legacy_slack_key, legacy_key
+
+        key = str(action.get("value") or "")
+        if not (is_legacy_slack_key(key) or key.startswith("slack:")):
+            return False  # a dashboard (or any non-Slack) session
+        threads = {legacy_key(key) or (key if is_legacy_slack_key(key) else "")}
+        threads.add((payload.get("message") or {}).get("thread_ts") or "")
+        threads.discard("")
+        dash = getattr(_orch, "dashboard_state", None)
+        for t in threads:
+            owner = _orch.sessions.get_session_for_thread(t)
+            if owner and not (is_legacy_slack_key(owner) or owner.startswith("slack:")):
+                return False  # the thread is bound to a dashboard session
+            if dash is not None and dash.get_linked_slot(t):
+                return False
+        who = _kc_running_turn_requester(key)
+        return bool(who) and who == user_id
+    except Exception:
+        return False
+
+
+def _kc_options_thread_ok(payload: dict) -> bool:
+    """False for an OPTIONS action in a thread Set T opened for the owner (members cannot answer there)."""
+    try:
+        from kiro_crew import _kc_confine as _kc_cf
+
+        thread_mode = getattr(_kc_cf, "_thread_mode", None)
+    except Exception:
+        return True  # no Set T: nothing marks a thread as the owner's
+    if thread_mode is None:
+        return True
+    try:
+        msg = payload.get("message") or {}
+        channel = (payload.get("channel") or {}).get("id", "")
+        thread_ts = msg.get("thread_ts") or msg.get("ts") or ""
+        return bool(channel and thread_ts) and thread_mode(channel, thread_ts) != "owner"
+    except Exception:
+        return False
 
 
 def _kc_member_control_ok(payload: dict, user_id: str) -> bool:
-    """True when an allowlisted member's payload holds only OPTIONS / ack / stop actions."""
-    ids = _kc_member_action_ids(payload, user_id)
-    return bool(ids) and all(
-        a in _KC_MEMBER_ACTION_IDS or a.startswith(_KC_MEMBER_ACTION_PREFIXES) for a in ids
-    )
+    """True when an allowlisted member's payload holds only OPTIONS / ack / stop actions they may use."""
+    actions = _kc_member_actions(payload, user_id)
+    if not actions:
+        return False
+    for action in actions:
+        aid = str(action.get("action_id", ""))
+        if aid == "stop_kill_now":
+            if not _kc_kill_now_ok(payload, action, user_id):
+                return False
+        elif aid in _KC_MEMBER_ACTION_IDS or aid.startswith(_KC_MEMBER_ACTION_PREFIXES):
+            is_options = aid.startswith(OPTIONS_ACTION_PREFIX) or aid in (OPTIONS_CHECKBOXES_ACTION, OPTIONS_SUBMIT_ACTION)
+            if is_options and not _kc_options_thread_ok(payload):
+                return False
+        else:
+            return False
+    return True
 
 
 def _kc_approval_tool_label(approval_key: str) -> str:
@@ -159,7 +269,7 @@ async def _kc_member_approval_notice(payload: dict, user_id: str) -> bool:
     first = (payload.get("actions") or [{}])[0] or {}
     token = first.get("value", "") or ids[0].rsplit("_", 1)[-1]
     tool = _kc_approval_tool_label(split_approval_token(token)[0])
-    tool = " ".join(tool.replace("*", " ").split())[:80]
+    tool = escape_mrkdwn(" ".join(tool.replace("*", " ").split())[:80])
     logger.info("Set N3: member %s pressed an approval button, refused", user_id)
     sel().log_api_access(
         caller=user_id,
@@ -198,7 +308,7 @@ import importlib
 import inspect
 
 I = importlib.import_module("kiro_crew.slack.interactions")
-for name in ("_kc_member_control_ok", "_kc_approval_tool_label", "_kc_member_approval_notice"):
+for name in ("_kc_member_control_ok", "_kc_kill_now_ok", "_kc_options_thread_ok", "_kc_approval_tool_label", "_kc_member_approval_notice"):
     assert hasattr(I, name), name
 assert "_kc_member_approval_notice(payload, _kc_uid)" in inspect.getsource(I.dispatch)
 print("Set N3: OK (imports + names verified)")
