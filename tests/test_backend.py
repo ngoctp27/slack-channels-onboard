@@ -11,6 +11,7 @@ import asyncio
 import json
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -537,3 +538,14 @@ def test_update_backend_refuses_unusable_values(backend_ops, monkeypatch):
 def test_backend_support_hides_the_column_on_a_stock_gateway(monkeypatch):
     monkeypatch.setattr(ops, "_backend_field_supported", lambda: False)
     assert asyncio.run(ops.backend_support()) == {"supported": False, "options": [], "default": "", "refuses": False}
+
+
+def test_capabilities_member_ask_and_controls(monkeypatch):
+    td, ia = types.ModuleType("td"), types.ModuleType("ia")
+    monkeypatch.setitem(sys.modules, "kiro_crew.slack.transport_dispatch", td)
+    monkeypatch.setitem(sys.modules, "kiro_crew.slack.interactions", ia)
+    caps = ops.access_capabilities()
+    assert caps["member_ask"] is False and caps["member_controls"] is False
+    td._kc_member_may_ask = ia._kc_member_control_ok = lambda *a: False
+    caps = ops.access_capabilities()
+    assert caps["member_ask"] is True and caps["member_controls"] is True

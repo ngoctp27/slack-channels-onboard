@@ -39,6 +39,7 @@ SETS=(
   t   # OS confinement (bwrap) for maintainer channels
   u   # per-agent ACP backend pin (agents.<name>.acp_backend)
   n1  # admins from KIROCREW_ADMIN_USER_IDS rank as owner on Slack (0.10.0 only)
+  n2  # members ask owner/admins for writes in confined channels (0.10.0 only)
 )
 
 if [ "${1:-}" = "--only" ]; then

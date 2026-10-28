@@ -11,7 +11,7 @@ import pytest
 import kiro_crew
 
 REPO = Path(__file__).resolve().parents[2]
-NSETS = ["n1"]  # Task 3-5 append "n2", "n3", "n4"
+NSETS = ["n1", "n2"]  # Task 4-5 append "n3", "n4"
 
 
 def _digest(root: Path) -> dict[str, str]:

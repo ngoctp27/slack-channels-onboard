@@ -10,6 +10,7 @@ collection of the backend suite, where ``kiro_crew`` is not installed.
 import importlib.util
 import json
 import os
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,3 +74,15 @@ def orch(monkeypatch, fake_slack):
     monkeypatch.setattr(interactions, "_orch", SimpleNamespace(slack=fake_slack, sessions=None))
     monkeypatch.setattr(interactions, "channel_inbound_permitted", _permitted)
     return fake_slack
+
+
+@pytest.fixture(autouse=True)
+def kc_ask_state(monkeypatch):
+    """Empty ask-the-owner registry and per-turn grant state for every test.
+
+    The R/R3/N2/N3 code reads both names through the ``renderer`` module at run time.
+    """
+    from kiro_crew.slack import renderer
+
+    monkeypatch.setattr(renderer, "_KC_ASK_OWNER", {})
+    monkeypatch.setattr(renderer, "_KC_TURN_STATE", weakref.WeakKeyDictionary())

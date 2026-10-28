@@ -44,6 +44,7 @@ The app detects every feature at runtime, by the function the gateway exposes
 | Open channels (every channel member, read-only) | Q, Q2 | proposed in kirodotdev/KiroCrew#22759 |
 | Workspace confinement for maintainer channels; a thread the owner opens runs unconfined and is owner-only | T (+ `sets/patch-src/kc_confine.py`) | proposed in kirodotdev/KiroCrew#22759 |
 | Admins (`KIROCREW_ADMIN_USER_IDS`) rank as owner on Slack, except the four primary-owner actions | N1 | fork-only, 0.10.0 |
+| Members ask the owner/admins for edits, commands and GET fetches, only in confined channels | N2 (needs T, N1) | fork-only, 0.10.0 |
 | Agent backend per channel | U | issue kirodotdev/KiroCrew#21910, PR #16200 (open) |
 | (support) | S: `KIROCREW_SLACK_TEAM_ID` in the agent env | PR kirodotdev/KiroCrew#22380, merged after 0.10.0; the set no-ops on a release that carries it |
 
@@ -104,6 +105,46 @@ replace that list. With no owner configured nobody is an owner, admins
 included. The dashboard itself still compares against the primary owner only.
 A thread an admin opens in a confined channel runs unconfined, as the owner's
 does (Set T).
+
+### Set N2: members ask for approval in confined channels
+
+Without N2 a member is read-only: every edit, command or fetch is refused. With
+N2 a member in `slack.allowed_users` (not a maintainer, not an admin) can make
+the bot post an approval card for the owner and the admins. The card reads
+`<@owner> <@admin> 🔐 Member <@user> cần quyền: *tool*` and has the R3 buttons
+(allow once, allow for this turn, deny). Only the owner and admins can press
+them. A member never gets a lasting rule: there is no "always allow" button, and
+nothing is written to `channel-roles.json`.
+
+What a member can ask for:
+
+- built-in file edit, delete and move;
+- shell commands;
+- a web fetch that is `http`/`https`, `GET` with no body, to a host name with a
+  dot or a global IP address. The card shows the URL. Refused without a card:
+  `file:`/`ftp:` URLs, `localhost`, `.local`/`.internal` names, private,
+  loopback and link-local addresses (including decimal/hex spellings), other
+  methods, and any body.
+
+MCP tools never qualify (spawn, cron, sending messages and so on stay denied).
+Reading files in the channel workspace still needs no approval (Set Q).
+
+**Only in a confined session.** The ask is offered only when the channel's agent
+process runs in the Set T sandbox for that channel's workspace. In any other
+session the request is denied and no card appears: approving it would run an
+unsandboxed command for a member. This needs a Linux gateway with `bwrap`
+installed; without it members are never asked and all their write requests are
+denied. Set T confines a channel that has maintainers; a channel that has only
+members needs `"confine": true` in its `channel-roles.json` entry.
+
+"Allow for this turn" covers file edits, deletes, moves and shell commands that
+stay inside the workspace, as for maintainers (Set R3). It never covers a fetch,
+so every fetch posts its own card. A fetch GET can still carry data in the query
+string; that is why the card shows the URL. A host name that resolves to an
+internal address (DNS rebinding) is not blocked, because the gateway does not
+resolve names before the card is shown.
+
+N2 needs R, R3, Q, T and N1, and is in the `apply.sh` "everything" run only.
 
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.

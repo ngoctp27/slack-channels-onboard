@@ -248,13 +248,14 @@ interface People {
   roles_error: string
   capabilities?: Caps
 }
-interface Caps { members: boolean; maintainers: boolean; commands: boolean; programs: boolean; open_channel: boolean; confinement: boolean; any: boolean }
+interface Caps { members: boolean; maintainers: boolean; commands: boolean; programs: boolean; open_channel: boolean; confinement: boolean; member_ask: boolean; member_controls: boolean; any: boolean }
 
-const NO_CAPS: Caps = { members: false, maintainers: false, commands: false, programs: false, open_channel: false, confinement: false, any: false }
+const NO_CAPS: Caps = { members: false, maintainers: false, commands: false, programs: false, open_channel: false, confinement: false, member_ask: false, member_controls: false, any: false }
 
 const label = (m: Member | undefined, id: string) => (m && (m.display || m.name)) || id
 
 function MembersCard({ people, onSaved, onError }: { people: People; onSaved: (msg: string) => void; onError: (m: string) => void }) {
+  const caps: Caps = people.capabilities ?? NO_CAPS
   const api = useAppApi()
   const [newId, setNewId] = useState('')
   const [busy, setBusy] = useState(false)
@@ -295,7 +296,11 @@ function MembersCard({ people, onSaved, onError }: { people: People; onSaved: (m
     <Card>
       <CardTitle>{t.membersTitle}</CardTitle>
       <ul className="text-xs text-muted mb-2 list-disc pl-5 space-y-0.5">
-        {t.membersHelp.map((x) => <li key={x}>{x}</li>)}
+        {[
+          caps.member_ask ? t.membersHelpAsk : t.membersHelpRead,
+          caps.member_controls ? t.membersHelpButtons : t.membersHelpNoButtons,
+          t.membersHelpOpen,
+        ].map((x) => <li key={x}>{x}</li>)}
       </ul>
       <table className="w-full text-left text-sm"><tbody>
         <tr className="border-t border-[var(--border)]">

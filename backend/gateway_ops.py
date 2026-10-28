@@ -644,6 +644,8 @@ def access_capabilities() -> dict:
         "programs": has(td, "_kc_ask_owner_register"),
         "open_channel": has(td, "_kc_member_shell_ok"),
         "confinement": has("kiro_crew._kc_confine", "maybe_confine", "session_confined"),
+        "member_ask": has(td, "_kc_member_may_ask"),
+        "member_controls": has("kiro_crew.slack.interactions", "_kc_member_control_ok"),
     }
     caps["any"] = caps["members"]
     return caps

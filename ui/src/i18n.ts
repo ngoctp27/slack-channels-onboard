@@ -62,11 +62,12 @@ const en = {
   peopleUnsupported:
     'This Kiro Crew gateway only lets the owner use the bot on Slack, so members, maintainers, approved commands and open channels would have no effect and are disabled here. They need a gateway with per-user Slack access control (see the README, section "People").',
   membersTitle: 'Members',
-  membersHelp: [
-    'May talk to the bot in every channel it is in, read-only: they can read files in that channel\'s workspace (not .env, keys, .git/…), cannot edit files or run commands.',
-    'No DMs, no clicking the bot\'s buttons, no spawn/cron/sending messages.',
-    'People outside this list can still talk in a channel whose Open switch is on, with the same read-only rights.',
-  ],
+  membersHelpRead: 'May talk to the bot in every channel it is in, read-only: they can read files in that channel\'s workspace (not .env, keys, .git/…), cannot edit files or run commands.',
+  membersHelpNoButtons: 'No DMs, no clicking the bot\'s buttons, no spawn/cron/sending messages.',
+  membersHelpAsk:
+    'May talk to the bot in every channel it is in. Reading files in that channel\'s workspace needs no approval (not .env, keys, .git/…). Editing files, running commands and GET web fetches post an approval card for the owner and admins, only in a channel whose agent runs confined (bwrap); elsewhere they are refused.',
+  membersHelpButtons: 'No DMs, no spawn/cron/sending messages. They can answer OPTIONS, acknowledge and stop, but cannot approve.',
+  membersHelpOpen: 'People outside this list can still talk in a channel whose Open switch is on, read-only.',
   ownerBadge: 'owner · full access',
   addMemberLabel: 'Slack user ID to add',
   addMemberPlaceholder: 'Slack user ID, e.g. U0XXXXXXXXX',
@@ -169,11 +170,12 @@ const vi: Partial<Strings> = {
   peopleUnsupported:
     'Gateway Kiro Crew này chỉ cho owner dùng bot trên Slack, nên member, maintainer, lệnh được duyệt và channel mở sẽ không có tác dụng và bị tắt ở đây. Cần gateway có kiểm soát truy cập Slack theo từng người (xem README, mục "People").',
   membersTitle: 'Member',
-  membersHelp: [
-    'Chat được với bot ở mọi channel bot có mặt, nhưng chỉ đọc: đọc file trong workspace của channel đó (trừ .env, khoá, .git/…), không sửa file, không chạy lệnh.',
-    'Không DM, không bấm nút của bot, không spawn/cron/gửi tin.',
-    'Người ngoài danh sách vẫn chat được ở channel bật cột Mở, với cùng quyền chỉ đọc.',
-  ],
+  membersHelpRead: 'Chat được với bot ở mọi channel bot có mặt, nhưng chỉ đọc: đọc file trong workspace của channel đó (trừ .env, khoá, .git/…), không sửa file, không chạy lệnh.',
+  membersHelpNoButtons: 'Không DM, không bấm nút của bot, không spawn/cron/gửi tin.',
+  membersHelpAsk:
+    'Chat được với bot ở mọi channel bot có mặt. Đọc file trong workspace của channel đó không cần duyệt (trừ .env, khoá, .git/…). Sửa file, chạy lệnh và fetch web bằng GET sẽ hiện card cho owner và admin duyệt, chỉ ở channel mà agent chạy trong sandbox (bwrap); nơi khác bị từ chối.',
+  membersHelpButtons: 'Không DM, không spawn/cron/gửi tin. Trả lời được OPTIONS, xác nhận và dừng, nhưng không duyệt được.',
+  membersHelpOpen: 'Người ngoài danh sách vẫn chat được ở channel bật cột Mở, chỉ đọc.',
   ownerBadge: 'owner · toàn quyền',
   addMemberLabel: 'Slack user ID cần thêm',
   addMemberPlaceholder: 'Slack user ID, ví dụ U0XXXXXXXXX',

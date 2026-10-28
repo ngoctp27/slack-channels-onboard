@@ -68,6 +68,17 @@ primary-owner-only too. A thread an admin opens runs unconfined, like the
 owner's. A mention in an approval card only notifies admins who are in that
 channel.
 
+**Members asking for approval.** On a 0.10.0 gateway carrying Set N2, a member
+can ask the owner and admins to approve a file edit, delete or move, a shell
+command, or a GET web fetch to a public host. The bot posts a card that
+mentions them; only they can press it, and a member never gets a lasting rule.
+This works only in a channel whose agent runs in the Set T sandbox. Anywhere
+else the request is denied without a card. That needs a Linux gateway with
+`bwrap` installed; without it members are never asked. A channel that has only
+members (no maintainer) must have `"confine": true` in its roles entry to be
+sandboxed. See [`gateway-patches/`](gateway-patches/README.md) for the exact
+rules.
+
 These controls exist only on a gateway carrying the patch sets in
 [`gateway-patches/`](gateway-patches/README.md). Read that page before applying
 them: they change who may use the bot, target Kiro Crew 0.9.0 and 0.10.0, and must be
