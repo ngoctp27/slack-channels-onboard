@@ -83,7 +83,7 @@ jobs:
           # list of the sets it supports instead.
           combos="b b,u b,k,m,o,m2,o2,o3 b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3"
           if [ "${{ matrix.kirocrew }}" = v0.10.0 ]; then
-            combos="$combos b,k,m,o,m2,o2,o3,n1 all"
+            combos="$combos b,k,m,o,m2,o2,o3,n1 b,k,m,o,m2,o2,o3,n1,n3 all"
           else
             combos="$combos b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3,s,t,u"
           fi

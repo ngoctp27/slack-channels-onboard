@@ -45,6 +45,7 @@ The app detects every feature at runtime, by the function the gateway exposes
 | Workspace confinement for maintainer channels; a thread the owner opens runs unconfined and is owner-only | T (+ `sets/patch-src/kc_confine.py`) | proposed in kirodotdev/KiroCrew#22759 |
 | Admins (`KIROCREW_ADMIN_USER_IDS`) rank as owner on Slack, except the four primary-owner actions | N1 | fork-only, 0.10.0 |
 | Members ask the owner/admins for edits, commands and GET fetches, only in confined channels | N2 (needs T, N1) | fork-only, 0.10.0 |
+| Members use OPTIONS, acknowledge and stop buttons; a member's approval click gets a public notice | N3 (needs O3, N1) | fork-only, 0.10.0 |
 | Agent backend per channel | U | issue kirodotdev/KiroCrew#21910, PR #16200 (open) |
 | (support) | S: `KIROCREW_SLACK_TEAM_ID` in the agent env | PR kirodotdev/KiroCrew#22380, merged after 0.10.0; the set no-ops on a release that carries it |
 
@@ -72,6 +73,7 @@ Combinations tested on pristine 0.9.0 and 0.10.0 trees:
 | + members (read-only) | `apply.sh --only b,k,m,o,m2,o2,o3` |
 | + maintainers, open channels, ask-the-owner | `apply.sh --only b,k,m,o,m2,o2,o3,p,p2,p3,q,q2,r,r2,r3` |
 | + admins (0.10.0 only) | `apply.sh --only b,k,m,o,m2,o2,o3,n1` |
+| + admins, member buttons (0.10.0 only) | `apply.sh --only b,k,m,o,m2,o2,o3,n1,n3` |
 | Everything, including confinement | `apply.sh` |
 
 "Everything" on 0.10.0 also includes the fork sets `n1` to `n4`, which change what
@@ -149,6 +151,24 @@ internal address (DNS rebinding) is not blocked, because the gateway does not
 resolve names before the card is shown.
 
 N2 needs R, R3, Q, T and N1, and is in the `apply.sh` "everything" run only.
+
+### Set N3: member buttons
+
+Set O3 drops every button press from someone who is not the owner. N3 lets a
+member in `slack.allowed_users` press three kinds of button, provided every
+action in the press is one of them:
+
+- OPTIONS answers (`options_choice_*`, the checkboxes and *Send*);
+- the cron and subagent *acknowledge* buttons;
+- the stop buttons (`mc_stop_confirm`, `mc_stop_cancel`, `stop_kill_now`).
+
+A member's OPTIONS answer still cannot enter a linked dashboard thread (Set N1).
+When a member presses a tool-approval button (allow, deny, trust, or the R3
+"whole turn" button), the bot posts a public notice in the card's thread
+(`<@user> không có quyền duyệt yêu cầu này: *tool*`). Nothing resolves and the
+card stays as it was. Anyone else not in the allowlist still gets the ephemeral
+"Chỉ owner/admin mới dùng được các nút này.". N3 does not need N2: without a
+member card the notice just omits the tool name. It needs O3 and N1.
 
 Then restart the gateway. The sets run in a fixed order (later sets anchor on
 text earlier ones wrote), and the run stops at the first failure.
