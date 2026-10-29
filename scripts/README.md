@@ -64,9 +64,16 @@ Builds the verify gateway under `--root`. It runs these steps in order, with
 2. Create `<root>/venv` and `pip install` `kc-src` into it.
 3. `kirocrew config set agent.apps_allow_third_party true` and
    `kirocrew config set dashboard.url http://127.0.0.1:<port>`.
-4. `kirocrew setup --slack`, which asks for the bot token and the app token.
-   It runs only when `<root>/home/.env` lacks `SLACK_BOT_TOKEN` or
-   `SLACK_APP_TOKEN`. The file is probed with `grep -q` and never printed.
+4. The Slack step of `kirocrew setup --slack`
+   (`kiro_crew.cli_setup._setup_slack_tokens`). It asks for the app token, the
+   bot token and your Slack member id, checks each against Slack and writes
+   them to `<root>/home/.env`. It runs only when that file lacks
+   `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`; the file is probed with `grep -q`
+   and never printed. The rest of the setup wizard is not run, because it would
+   also point `~/.local/bin/kirocrew` at the verify venv and install the shared
+   kiro-cli agent spec. On a Kiro Crew without that function the script warns
+   and you connect Slack from the verify dashboard (Settings, Messaging
+   Channels) after the first `verify-install.sh`.
 5. Write the systemd user unit, run `systemctl --user daemon-reload` and
    `systemctl --user enable`. The unit is **not started**: the gateway stays
    unpatched until `verify-install.sh` has run.
@@ -97,8 +104,8 @@ bash scripts/verify-init.sh --root /path/to/verify-root [options]
 Preflight checks: a usable Python 3.12 or newer, `git`, `systemctl --user`
 (fatal in a real run, a warning under `--dry-run`), `bwrap` (warning only), and
 that `127.0.0.1:<port>` can be bound. A busy port stops the run, except when the
-unit is already active (a re-run). Paths that contain whitespace, `%`, `"` or
-`\` are refused with exit 2, because they go into the unit file.
+unit is already active (a re-run). Paths that contain whitespace, `%`, `$`, `"`
+or `\` are refused with exit 2, because they go into the unit file.
 
 **Re-running** is safe. A finished step prints `skipped (already done)`. A
 re-run with a different `--name`, `--port` or `--kc-ref` than the one in
@@ -238,6 +245,19 @@ Outside the root, one file:
 ${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}/kirocrew-verify-<name>.service
 ```
 
+What the **gateway** writes outside the root. The scripts do not write these;
+the verify gateway does, as any Kiro Crew gateway does, because they belong to
+the kiro-cli installation under the unchanged `HOME`:
+
+- `~/.local/bin/kirocrew`: on start, a gateway links its own `kirocrew` there
+  when no working `kirocrew` is on `PATH` yet. On a host without another Kiro
+  Crew install, plain `kirocrew` then runs the verify venv with the default
+  `~/.kiro/crew` home. Always use the full command the summary prints.
+- `~/.kiro/agents` and `~/.kiro/settings/mcp.json`: kiro-cli's own agent specs
+  and MCP settings. A gateway with a non-default `KIROCREW_HOME` writes its
+  agent spec there only when no spec of a default-home install exists, so it
+  does not take over a real install's spec.
+
 `verify.env` holds the keys `VERIFY_FORMAT`, `ROOT`, `NAME`, `PORT`, `KC_REF`,
 `KC_SRC`, `VENV`, `KC_SITE`, `KIROCREW_HOME`, `UNIT`, `UNIT_FILE` and
 `ADMIN_ENV_FILE`. The scripts parse it as data and never `source` it.
@@ -266,7 +286,7 @@ lives outside the root.
 
 | Symptom | Cause and fix |
 |---|---|
-| `port N on 127.0.0.1 is already in use` | Another process holds the port. Pick another with `verify-init.sh --port`. |
+| `port N on 127.0.0.1 is already in use` (`verify-init.sh`) | Another process holds the port. Pick another with `verify-init.sh --port`. |
 | `bwrap not found` warning | Set T and the member approval cards of Set N2 will not work. Install bubblewrap, then run `verify-install.sh` again. |
 | `CHECK ANCHORS` in the apply log | A patch set does not match the Kiro Crew version in `kc-src`. The gateway stays stopped. Check that `--kc-ref` is a version the sets target (see `gateway-patches/README.md`), or pass a `--sets` list that fits. The log path is in the error message. |
 | The people in `admins.env` have no admin rights | The unit has no `EnvironmentFile=` line (init ran without `--admin-env-file`; run `verify-init.sh` again with it), or the file is missing or unreadable (the `-` makes systemd skip it silently). Check with `systemctl --user cat <unit>`. |

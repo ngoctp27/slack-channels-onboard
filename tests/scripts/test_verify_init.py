@@ -192,7 +192,7 @@ def test_busy_port_tolerated_when_unit_active(sandbox: Sandbox, py312: str, tmp_
     assert sandbox.calls("systemctl")[-1].startswith("--user is-active")
 
 
-@pytest.mark.parametrize("bad", ["a b", "a%b", 'a"b', "a\\b", "a\tb"])
+@pytest.mark.parametrize("bad", ["a b", "a%b", 'a"b', "a\\b", "a\tb", "a$b", "a${HOME}b"])
 def test_unit_unsafe_root_is_usage_error(sandbox: Sandbox, py312: str, tmp_path, bad: str) -> None:
     root = tmp_path / bad
     for extra in ((), ("--dry-run",), ("--skip-unit",)):
@@ -202,7 +202,7 @@ def test_unit_unsafe_root_is_usage_error(sandbox: Sandbox, py312: str, tmp_path,
     assert not root.exists()
 
 
-@pytest.mark.parametrize("bad", ["a b", "a%b", 'a"b', "a\\b"])
+@pytest.mark.parametrize("bad", ["a b", "a%b", 'a"b', "a\\b", "a$b"])
 def test_unit_unsafe_admin_env_file_is_usage_error(
     sandbox: Sandbox, py312: str, tmp_path, bad: str
 ) -> None:
@@ -219,7 +219,7 @@ def test_unit_unsafe_admin_env_file_is_usage_error(
 def test_dry_run_slack_step_names_the_command(sandbox: Sandbox, py312: str, tmp_path) -> None:
     r = _ok(sandbox, py312, tmp_path / "r", "--dry-run")
     line = next(l for l in r.stdout.splitlines() if "slack setup:" in l)
-    assert "setup --slack" in line
+    assert "_setup_slack_tokens" in line
 
 
 def test_dry_run_skip_unit_marks_unit_steps_skipped(sandbox: Sandbox, py312: str, tmp_path) -> None:

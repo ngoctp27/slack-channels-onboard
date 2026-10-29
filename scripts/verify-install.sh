@@ -335,11 +335,12 @@ if [ -n "$SETS" ]; then ONLY=(--only "$SETS"); fi
 
 run_apply() {
   local run="$1" out rc cmd why=""
-  cmd="env KC_SITE_OVERRIDE=$KC_SITE KC_PYTHON=$VENV/bin/python bash $CHECKOUT/gateway-patches/apply.sh${SETS:+ --only $SETS}"
+  cmd="env KC_SITE_OVERRIDE=$SITE_REAL KC_PYTHON=$VENV/bin/python bash $CHECKOUT/gateway-patches/apply.sh${SETS:+ --only $SETS}"
   vlog "apply.sh, $run pass"
   set +e
-  out=$(env KC_SITE_OVERRIDE="$KC_SITE" KC_PYTHON="$VENV/bin/python" \
-    bash "$CHECKOUT/gateway-patches/apply.sh" ${ONLY[@]+"${ONLY[@]}"} 2>&1)
+  # SITE_REAL is the path the reset guard checked; no prompt may hang the run.
+  out=$(env KC_SITE_OVERRIDE="$SITE_REAL" KC_PYTHON="$VENV/bin/python" \
+    bash "$CHECKOUT/gateway-patches/apply.sh" ${ONLY[@]+"${ONLY[@]}"} 2>&1 </dev/null)
   rc=$?
   set -e
   printf '=== apply.sh %s run: %s ===\n%s\n' "$run" "$cmd" "$out" >>"$LOG" \

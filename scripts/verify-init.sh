@@ -28,11 +28,12 @@
 #   KC_REPO_URL            Kiro Crew git URL (default: https://github.com/kirodotdev/KiroCrew.git)
 #
 # Steps after the venv, all with KIROCREW_HOME=<root>/home (mode 700): two
-# `kirocrew config set` calls, `kirocrew setup --slack` (interactive, only when
-# home/.env lacks SLACK_BOT_TOKEN or SLACK_APP_TOKEN; the file is never printed),
+# `kirocrew config set` calls, the Slack step of `kirocrew setup --slack`
+# (kiro_crew.cli_setup._setup_slack_tokens, interactive, only when home/.env
+# lacks SLACK_BOT_TOKEN or SLACK_APP_TOKEN; the file is never printed),
 # then the unit file, `systemctl --user daemon-reload` and `enable` (never
 # `start`: the gateway stays unpatched until verify-install.sh has run). Paths
-# with whitespace, %, " or \ are refused (exit 2) because they go into the unit.
+# with whitespace, %, $, " or \ are refused (exit 2) because they go into the unit.
 #
 # Re-running is safe: finished steps print "skipped (already done)". Re-running with
 # a different --name, --port or --kc-ref than the recorded verify.env is refused;
@@ -98,10 +99,11 @@ case "$KC_REPO_URL" in -*) vusage_die "invalid KC_REPO_URL '$KC_REPO_URL' (must 
 ROOT=$(vsafe_root "$ROOT_ARG") || exit $?
 
 # Paths end up in the systemd unit; its quoting rules are not worth supporting.
+# systemd expands % specifiers everywhere and $VAR in ExecStart=, so both are out.
 check_unit_path() {
   case "$2" in
-    *[[:space:]]* | *%* | *\"* | *\\*)
-      vdie "$1 must not contain whitespace, %, \" or \\ (systemd unit quoting): $2" 2 ;;
+    *[[:space:]]* | *%* | *\$* | *\"* | *\\*)
+      vdie "$1 must not contain whitespace, %, \$, \" or \\ (systemd unit quoting): $2" 2 ;;
   esac
 }
 check_unit_path "--root" "$ROOT"
@@ -201,7 +203,7 @@ if [ "$DRY_RUN" = 1 ]; then
   if [ "$SKIP_SLACK" = 1 ]; then
     plan "4. slack setup: skipped (--skip-slack)"
   else
-    plan "4. slack setup: kirocrew setup --slack (interactive; only if $KIROCREW_HOME/.env lacks the tokens)"
+    plan "4. slack setup: kiro_crew.cli_setup._setup_slack_tokens (interactive; only if $KIROCREW_HOME/.env lacks the tokens)"
   fi
   if [ "$SKIP_UNIT" = 1 ]; then
     plan "5. write unit: skipped (--skip-unit)"
@@ -285,9 +287,28 @@ if [ "$SKIP_SLACK" = 1 ]; then
 elif slack_tokens_set; then
   vlog "slack: skipped (tokens already set)"
 else
-  vlog "slack: kirocrew setup --slack (interactive)"
-  kirocrew setup --slack || vdie "kirocrew setup --slack failed"
-  slack_tokens_set || vwarn "Slack tokens are still missing in $KIROCREW_HOME/.env; the gateway will not connect to Slack"
+  # Only the Slack step of `kirocrew setup --slack`. The whole wizard would also
+  # install the shared kiro-cli agent spec, point ~/.local/bin/kirocrew at this
+  # venv (taking the command over from any other install) and ask for a
+  # workspace, a timezone and a dashboard URL.
+  vlog "slack: kiro_crew.cli_setup._setup_slack_tokens (interactive: app token, bot token, your member id)"
+  set +e
+  KIROCREW_HOME="$KIROCREW_HOME" "$VENV/bin/python" -c '
+import sys
+try:
+    from kiro_crew.cli_setup import _setup_slack_tokens
+except ImportError:
+    sys.exit(3)
+_setup_slack_tokens()'
+  slack_rc=$?
+  set -e
+  if [ "$slack_rc" = 3 ]; then
+    vwarn "this Kiro Crew has no Slack-only setup step; after verify-install.sh has started the gateway, connect Slack from its dashboard (Settings, Messaging Channels)"
+  elif [ "$slack_rc" != 0 ]; then
+    vdie "the Slack setup failed (exit $slack_rc)"
+  elif ! slack_tokens_set; then
+    vwarn "Slack tokens are still missing in $KIROCREW_HOME/.env; the gateway will not connect to Slack"
+  fi
 fi
 
 # 5. systemd user unit (written, enabled, never started: the gateway is unpatched

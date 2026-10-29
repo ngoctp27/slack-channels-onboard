@@ -52,6 +52,18 @@ def make_fake_kirocrew(repo: Path, tag: str = "v0.10.0") -> None:
         where = ["src"]
         """))
     (repo / "src" / "kiro_crew" / "__init__.py").write_text("")
+    # Like kiro_crew.cli_setup in 0.10.0: the Slack-only step of the setup wizard.
+    (repo / "src" / "kiro_crew" / "cli_setup.py").write_text(textwrap.dedent("""\
+        import os
+        import sys
+
+        if not os.environ.get("FAKE_NO_SLACK_STEP"):
+            def _setup_slack_tokens():
+                with open(os.environ["FAKE_KC_LOG"], "a") as f:
+                    f.write("slack tokens | " + os.environ.get("KIROCREW_HOME", "") + "\\n")
+                if os.environ.get("FAKE_SLACK_FAIL"):
+                    sys.exit(5)
+        """))
     (repo / "src" / "kiro_crew" / "cli.py").write_text(textwrap.dedent("""\
         import os
         import sys
@@ -324,7 +336,7 @@ def test_skip_unit_still_configures_home_and_slack_but_writes_no_unit(ctx: Ctx) 
     r = ctx.run("--skip-unit", "--enable-linger")
     assert r.returncode == 0, r.stderr
     assert any(c.startswith("config set") for c in ctx.kc_calls())
-    assert "setup --slack" in " ".join(ctx.kc_calls())
+    assert "slack tokens" in " ".join(ctx.kc_calls())
     assert not ctx.sd.exists()
     assert ctx.b.sb.calls("systemctl") == []
     assert ctx.b.sb.calls("loginctl") == []
@@ -432,7 +444,7 @@ def _write_dotenv(ctx: Ctx, text: str) -> None:
 def test_slack_setup_runs_when_tokens_missing(ctx: Ctx) -> None:
     r = ctx.run("--skip-unit")
     assert r.returncode == 0, r.stderr
-    assert f"setup --slack | {ctx.root}/home" in ctx.kc_calls()
+    assert f"slack tokens | {ctx.root}/home" in ctx.kc_calls()
     assert "skipped (tokens already set)" not in r.stdout
 
 
@@ -440,7 +452,7 @@ def test_slack_setup_skipped_when_both_tokens_present(ctx: Ctx) -> None:
     _write_dotenv(ctx, "SLACK_BOT_TOKEN=xoxb-test-not-real\nSLACK_APP_TOKEN=xapp-test-not-real\n")
     r = ctx.run("--skip-unit")
     assert r.returncode == 0, r.stderr
-    assert not any(c.startswith("setup") for c in ctx.kc_calls())
+    assert not any(c.startswith(("setup", "slack tokens")) for c in ctx.kc_calls())
     assert ">>> slack: skipped (tokens already set)" in r.stdout
     out = r.stdout + r.stderr
     assert "xoxb-test-not-real" not in out and "xapp-test-not-real" not in out
@@ -457,7 +469,7 @@ def test_slack_setup_runs_when_one_token_missing_or_empty(ctx: Ctx, text: str) -
     _write_dotenv(ctx, text)
     r = ctx.run("--skip-unit")
     assert r.returncode == 0, r.stderr
-    assert f"setup --slack | {ctx.root}/home" in ctx.kc_calls()
+    assert f"slack tokens | {ctx.root}/home" in ctx.kc_calls()
     out = r.stdout + r.stderr
     assert "xoxb-test-not-real" not in out and "xapp-test-not-real" not in out
 
@@ -465,17 +477,31 @@ def test_slack_setup_runs_when_one_token_missing_or_empty(ctx: Ctx, text: str) -
 def test_skip_slack_never_calls_setup(ctx: Ctx) -> None:
     r = ctx.run("--skip-slack", "--skip-unit")
     assert r.returncode == 0, r.stderr
-    assert not any(c.startswith("setup") for c in ctx.kc_calls())
+    assert not any(c.startswith(("setup", "slack tokens")) for c in ctx.kc_calls())
 
 
 def test_slack_setup_failure_is_fatal(ctx: Ctx) -> None:
-    wrapper = ctx.root / "venv/bin/kirocrew"
-    wrapper.write_text(
-        f'#!/bin/bash\n[ "$1" = setup ] && exit 5\nexec "{ctx.b.root}/venv/bin/kirocrew" "$@"\n')
-    r = ctx.run()
+    r = ctx.run(FAKE_SLACK_FAIL="1")
     assert r.returncode != 0
     assert "!! " in r.stderr and "slack" in r.stderr.lower()
     assert not (ctx.root / "verify.env").exists()
+
+
+def test_slack_step_never_runs_the_whole_setup_wizard(ctx: Ctx) -> None:
+    # `kirocrew setup` also installs the agent spec, claims ~/.local/bin/kirocrew
+    # and asks for the dashboard URL; only its Slack step is wanted here.
+    r = ctx.run("--skip-unit")
+    assert r.returncode == 0, r.stderr
+    assert not any(c.startswith("setup") for c in ctx.kc_calls())
+    assert f"slack tokens | {ctx.root}/home" in ctx.kc_calls()
+
+
+def test_missing_slack_step_falls_back_to_the_dashboard(ctx: Ctx) -> None:
+    r = ctx.run("--skip-unit", FAKE_NO_SLACK_STEP="1")
+    assert r.returncode == 0, r.stderr
+    assert "dashboard" in r.stderr.lower()
+    assert not any(c.startswith(("setup", "slack tokens")) for c in ctx.kc_calls())
+    assert (ctx.root / "verify.env").exists()
 
 
 def test_dry_run_with_venv_calls_nothing(ctx: Ctx) -> None:
