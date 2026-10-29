@@ -98,6 +98,7 @@ class Sandbox:
         return subprocess.run(
             [str(self.tools / "bash"), str(SCRIPTS / script), *args],
             env=self.env(**extra_env),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,

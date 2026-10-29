@@ -102,7 +102,8 @@ def built(tmp_path_factory) -> Built:
     port = _free_port()
     first = sb.run(SCRIPT, "--root", str(root), "--python", py, "--port", str(port),
                    "--skip-slack", "--skip-unit",
-                   KC_REPO_URL=f"file://{repo}", **_passthrough())
+                   KC_REPO_URL=f"file://{repo}", FAKE_KC_LOG=str(tmp / "kc-first.log"),
+                   **_passthrough())
     if first.returncode != 0 and any(m in first.stdout + first.stderr for m in _NO_NET):
         pytest.skip("pip needs the network to fetch setuptools; none available")
     return Built(sb, py, repo, root, port, first)
@@ -115,6 +116,7 @@ def _env_dict(path: Path) -> dict[str, str]:
 def _rerun(b: Built, *extra: str, **env: str) -> subprocess.CompletedProcess:
     args = ["--root", str(b.root), "--python", b.py, "--port", str(b.port),
             "--skip-slack", "--skip-unit", *extra]
+    env.setdefault("FAKE_KC_LOG", str(b.sb.tmp / "kc-rerun.log"))
     return b.sb.run(SCRIPT, *args, KC_REPO_URL=f"file://{b.repo}", **env)
 
 
@@ -166,7 +168,7 @@ def test_rerun_with_other_port_is_refused(built: Built) -> None:
     before = (built.root / "verify.env").read_text()
     r = built.sb.run(SCRIPT, "--root", str(built.root), "--python", built.py,
                      "--port", str(_free_port()), "--skip-slack", "--skip-unit",
-                     KC_REPO_URL=f"file://{built.repo}")
+                     KC_REPO_URL=f"file://{built.repo}", FAKE_KC_LOG=str(built.sb.tmp / "kc-x.log"))
     assert r.returncode == 2
     assert "!! " in r.stderr and "PORT" in r.stderr
     assert (built.root / "verify.env").read_text() == before
@@ -225,3 +227,261 @@ def test_existing_clone_with_matching_ref_is_accepted(built: Built, tmp_path) ->
     assert "clone: skipped (already done)" in r.stdout
     assert r.returncode != 0  # the stubbed venv build fails
     assert not (root / "verify.env").exists()
+
+
+# ---- home config, Slack setup, systemd unit (Task 3) --------------------------
+# These reuse the module's one real venv: each test gets its own ROOT whose
+# venv/bin/{python,kirocrew} are thin wrappers around the built venv.
+
+class Ctx(NamedTuple):
+    b: Built
+    root: Path
+    sd: Path
+    kc_log: Path
+    port: int
+
+    @property
+    def home(self) -> Path:
+        return self.root / "home"
+
+    @property
+    def unit_file(self) -> Path:
+        return self.sd / "kirocrew-verify-verify.service"
+
+    def kc_calls(self) -> list[str]:
+        return self.kc_log.read_text().splitlines() if self.kc_log.exists() else []
+
+    def run(self, *extra: str, **env: str) -> subprocess.CompletedProcess:
+        if not (self.b.sb.stubs / "loginctl").exists():
+            self.b.sb.stub("loginctl")
+        self.b.sb.log.unlink(missing_ok=True)
+        args = ["--root", str(self.root), "--python", self.b.py, "--port", str(self.port),
+                *extra]
+        return self.b.sb.run(SCRIPT, *args, KC_REPO_URL=f"file://{self.b.repo}",
+                             SYSTEMD_USER_DIR=str(self.sd), FAKE_KC_LOG=str(self.kc_log), **env)
+
+
+@pytest.fixture
+def ctx(built: Built, tmp_path) -> Ctx:
+    root = tmp_path / "froot"
+    root.mkdir()
+    _pre_clone(built, root)
+    bindir = root / "venv" / "bin"
+    bindir.mkdir(parents=True)
+    for n in ("python", "kirocrew"):
+        w = bindir / n
+        w.write_text(f'#!/bin/bash\nexec "{built.root}/venv/bin/{n}" "$@"\n')
+        w.chmod(0o755)
+    return Ctx(built, root, tmp_path / "sd", tmp_path / "kc.log", _free_port())
+
+
+def _unit_text(root: Path, port: int, admin: str = "") -> str:
+    lines = [
+        "[Unit]",
+        "Description=Kiro Crew verify gateway (verify)",
+        "After=network-online.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        f"Environment=KIROCREW_HOME={root}/home",
+    ]
+    if admin:
+        lines.append(f"EnvironmentFile=-{admin}")
+    lines += [
+        f"ExecStart={root}/venv/bin/kirocrew gateway --no-open --no-tunnel --port {port}",
+        "Restart=on-failure",
+        "RestartSec=5",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _port_of(c: Ctx) -> int:
+    return int(_env_dict(c.root / "verify.env")["PORT"])
+
+
+def _strip_header(text: str) -> str:
+    first, _, rest = text.partition("\n")
+    return rest if first.startswith("# Written by scripts/verify-init.sh") else text
+
+
+def test_config_set_calls_use_the_verify_home(ctx: Ctx) -> None:
+    r = ctx.run("--skip-slack", "--skip-unit")
+    assert r.returncode == 0, r.stderr
+    port = _port_of(ctx)
+    home = f"{ctx.root}/home"
+    assert ctx.kc_calls() == [
+        f"config set agent.apps_allow_third_party true | {home}",
+        f"config set dashboard.url http://127.0.0.1:{port} | {home}",
+    ]
+    assert stat.S_IMODE(os.stat(ctx.home).st_mode) == 0o700
+
+
+def test_skip_unit_still_configures_home_and_slack_but_writes_no_unit(ctx: Ctx) -> None:
+    r = ctx.run("--skip-unit", "--enable-linger")
+    assert r.returncode == 0, r.stderr
+    assert any(c.startswith("config set") for c in ctx.kc_calls())
+    assert "setup --slack" in " ".join(ctx.kc_calls())
+    assert not ctx.sd.exists()
+    assert ctx.b.sb.calls("systemctl") == []
+    assert ctx.b.sb.calls("loginctl") == []
+
+
+def test_unit_content_without_admin_env_file(ctx: Ctx) -> None:
+    r = ctx.run("--skip-slack")
+    assert r.returncode == 0, r.stderr
+    text = ctx.unit_file.read_text()
+    assert _strip_header(text) == _unit_text(ctx.root, _port_of(ctx))
+    assert "EnvironmentFile" not in text
+    assert "only when" not in text
+    assert [l for l in text.splitlines() if l.startswith("#")] in ([], [text.splitlines()[0]])
+    assert str(ctx.b.sb.home) not in text
+    assert stat.S_IMODE(os.stat(ctx.unit_file).st_mode) == 0o644
+    assert list(ctx.sd.iterdir()) == [ctx.unit_file]  # no temp file left behind
+
+
+def test_unit_content_with_admin_env_file(ctx: Ctx, tmp_path) -> None:
+    f = tmp_path / "admins.env"
+    f.write_text("KIROCREW_ADMIN_USER_IDS=SECRET_MARKER\n")
+    r = ctx.run("--skip-slack", "--admin-env-file", str(f))
+    assert r.returncode == 0, r.stderr
+    assert _strip_header(ctx.unit_file.read_text()) == _unit_text(ctx.root, _port_of(ctx), str(f))
+    assert "SECRET_MARKER" not in r.stdout + r.stderr + ctx.unit_file.read_text()
+
+
+def test_systemctl_gets_daemon_reload_then_enable_never_start(ctx: Ctx) -> None:
+    r = ctx.run("--skip-slack")
+    assert r.returncode == 0, r.stderr
+    assert ctx.b.sb.calls("systemctl") == [
+        "--user show-environment",
+        "--user daemon-reload",
+        "--user enable kirocrew-verify-verify.service",
+    ]
+    assert not any("start" in c or "restart" in c for c in ctx.b.sb.calls("systemctl"))
+
+
+def test_unit_rerun_unchanged_skips_rewrite_and_reload_but_enables(ctx: Ctx) -> None:
+    assert ctx.run("--skip-slack").returncode == 0
+    before = ctx.unit_file.read_text()
+    mtime = os.stat(ctx.unit_file).st_mtime_ns
+    r = ctx.run("--skip-slack")
+    assert r.returncode == 0, r.stderr
+    assert ">>> unit: skipped (unchanged)" in r.stdout
+    assert ctx.unit_file.read_text() == before
+    assert os.stat(ctx.unit_file).st_mtime_ns == mtime
+    assert ctx.b.sb.calls("systemctl") == [
+        "--user show-environment",
+        "--user enable kirocrew-verify-verify.service",
+    ]
+
+
+def test_unit_rerun_with_changed_content_rewrites_and_reloads(ctx: Ctx, tmp_path) -> None:
+    assert ctx.run("--skip-slack").returncode == 0
+    f = tmp_path / "admins.env"
+    f.write_text("KIROCREW_ADMIN_USER_IDS=X\n")
+    r = ctx.run("--skip-slack", "--admin-env-file", str(f))
+    assert r.returncode == 0, r.stderr
+    assert f"EnvironmentFile=-{f}" in ctx.unit_file.read_text()
+    assert "unchanged" not in r.stdout
+    assert "--user daemon-reload" in ctx.b.sb.calls("systemctl")
+
+
+def test_linger_only_with_flag(ctx: Ctx) -> None:
+    ctx.b.sb.stub("loginctl")
+    assert ctx.run("--skip-slack").returncode == 0
+    assert ctx.b.sb.calls("loginctl") == []
+    r = ctx.run("--skip-slack", "--enable-linger", USER="someone")
+    assert r.returncode == 0, r.stderr
+    assert ctx.b.sb.calls("loginctl") == ["enable-linger someone"]
+    assert not any("sudo" in c for c in ctx.b.sb.calls("loginctl"))
+
+
+def test_linger_failure_is_a_warning_with_hint(ctx: Ctx) -> None:
+    ctx.b.sb.stub("loginctl", exit_code=1)
+    r = ctx.run("--skip-slack", "--enable-linger", USER="someone")
+    assert r.returncode == 0, r.stderr
+    assert "-- warning:" in r.stderr and "enable-linger" in r.stderr
+    ctx.b.sb.stub("loginctl")
+
+
+def test_systemctl_enable_failure_is_fatal(ctx: Ctx) -> None:
+    ctx.b.sb.stub("systemctl", body='[ "$2" = enable ] && exit 1')
+    r = ctx.run("--skip-slack")
+    assert r.returncode == 1
+    assert "!! " in r.stderr and not (ctx.root / "verify.env").exists()
+    ctx.b.sb.stub("systemctl")
+
+
+def test_final_message_names_next_step(ctx: Ctx) -> None:
+    r = ctx.run("--skip-slack")
+    assert r.returncode == 0, r.stderr
+    assert f"scripts/verify-install.sh --root {ctx.root} --pr <N>" in r.stdout
+    assert (ctx.root / "verify.env").exists()
+
+
+# Slack: the .env is only probed, never printed.
+
+def _write_dotenv(ctx: Ctx, text: str) -> None:
+    ctx.home.mkdir(mode=0o700, exist_ok=True)
+    (ctx.home / ".env").write_text(text)
+
+
+def test_slack_setup_runs_when_tokens_missing(ctx: Ctx) -> None:
+    r = ctx.run("--skip-unit")
+    assert r.returncode == 0, r.stderr
+    assert f"setup --slack | {ctx.root}/home" in ctx.kc_calls()
+    assert "skipped (tokens already set)" not in r.stdout
+
+
+def test_slack_setup_skipped_when_both_tokens_present(ctx: Ctx) -> None:
+    _write_dotenv(ctx, "SLACK_BOT_TOKEN=xoxb-test-not-real\nSLACK_APP_TOKEN=xapp-test-not-real\n")
+    r = ctx.run("--skip-unit")
+    assert r.returncode == 0, r.stderr
+    assert not any(c.startswith("setup") for c in ctx.kc_calls())
+    assert ">>> slack: skipped (tokens already set)" in r.stdout
+    out = r.stdout + r.stderr
+    assert "xoxb-test-not-real" not in out and "xapp-test-not-real" not in out
+
+
+@pytest.mark.parametrize("text", [
+    "SLACK_BOT_TOKEN=xoxb-test-not-real\n",
+    "SLACK_APP_TOKEN=xapp-test-not-real\n",
+    "SLACK_BOT_TOKEN=xoxb-test-not-real\nSLACK_APP_TOKEN=\n",
+    "SLACK_BOT_TOKEN=\nSLACK_APP_TOKEN=xapp-test-not-real\n",
+    "# SLACK_BOT_TOKEN=xoxb-test-not-real\nSLACK_APP_TOKEN=xapp-test-not-real\n",
+])
+def test_slack_setup_runs_when_one_token_missing_or_empty(ctx: Ctx, text: str) -> None:
+    _write_dotenv(ctx, text)
+    r = ctx.run("--skip-unit")
+    assert r.returncode == 0, r.stderr
+    assert f"setup --slack | {ctx.root}/home" in ctx.kc_calls()
+    out = r.stdout + r.stderr
+    assert "xoxb-test-not-real" not in out and "xapp-test-not-real" not in out
+
+
+def test_skip_slack_never_calls_setup(ctx: Ctx) -> None:
+    r = ctx.run("--skip-slack", "--skip-unit")
+    assert r.returncode == 0, r.stderr
+    assert not any(c.startswith("setup") for c in ctx.kc_calls())
+
+
+def test_slack_setup_failure_is_fatal(ctx: Ctx) -> None:
+    wrapper = ctx.root / "venv/bin/kirocrew"
+    wrapper.write_text(
+        f'#!/bin/bash\n[ "$1" = setup ] && exit 5\nexec "{ctx.b.root}/venv/bin/kirocrew" "$@"\n')
+    r = ctx.run()
+    assert r.returncode != 0
+    assert "!! " in r.stderr and "slack" in r.stderr.lower()
+    assert not (ctx.root / "verify.env").exists()
+
+
+def test_dry_run_with_venv_calls_nothing(ctx: Ctx) -> None:
+    r = ctx.run("--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert ctx.kc_calls() == []
+    assert ctx.b.sb.calls("systemctl") == ["--user show-environment"]
+    assert ctx.b.sb.calls("loginctl") == []
+    assert not ctx.sd.exists() and not ctx.home.exists()

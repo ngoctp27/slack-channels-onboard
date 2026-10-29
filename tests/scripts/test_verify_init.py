@@ -192,12 +192,34 @@ def test_busy_port_tolerated_when_unit_active(sandbox: Sandbox, py312: str, tmp_
     assert sandbox.calls("systemctl")[-1].startswith("--user is-active")
 
 
-def test_real_run_stops_after_preflight(sandbox: Sandbox, py312: str, tmp_path) -> None:
-    root = tmp_path / "r"
-    r = _ok(sandbox, py312, root)
-    assert r.returncode == 1
-    assert "not implemented yet" in r.stderr
+@pytest.mark.parametrize("bad", ["a b", "a%b", 'a"b', "a\\b", "a\tb"])
+def test_unit_unsafe_root_is_usage_error(sandbox: Sandbox, py312: str, tmp_path, bad: str) -> None:
+    root = tmp_path / bad
+    for extra in ((), ("--dry-run",), ("--skip-unit",)):
+        r = _ok(sandbox, py312, root, *extra)
+        assert r.returncode == 2, (bad, extra)
+        assert "!! " in r.stderr
     assert not root.exists()
+
+
+@pytest.mark.parametrize("bad", ["a b", "a%b", 'a"b', "a\\b"])
+def test_unit_unsafe_admin_env_file_is_usage_error(
+    sandbox: Sandbox, py312: str, tmp_path, bad: str
+) -> None:
+    f = tmp_path / bad
+    f.write_text("KIROCREW_ADMIN_USER_IDS=X\n")
+    root = tmp_path / "r"
+    r = _ok(sandbox, py312, root, "--admin-env-file", str(f))
+    assert r.returncode == 2
+    assert "!! " in r.stderr
+    assert not root.exists()
+    assert sandbox.calls("systemctl") == []
+
+
+def test_dry_run_slack_step_names_the_command(sandbox: Sandbox, py312: str, tmp_path) -> None:
+    r = _ok(sandbox, py312, tmp_path / "r", "--dry-run")
+    line = next(l for l in r.stdout.splitlines() if "slack setup:" in l)
+    assert "setup --slack" in line
 
 
 def test_dry_run_skip_unit_marks_unit_steps_skipped(sandbox: Sandbox, py312: str, tmp_path) -> None:
