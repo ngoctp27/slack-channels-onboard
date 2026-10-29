@@ -301,7 +301,7 @@ if [ -n "$SETS" ]; then ONLY=(--only "$SETS"); fi
 run_apply() {
   local run="$1" out rc cmd why=""
   cmd="env KC_SITE_OVERRIDE=$KC_SITE KC_PYTHON=$VENV/bin/python bash $CHECKOUT/gateway-patches/apply.sh${SETS:+ --only $SETS}"
-  vlog "apply.sh: $run run"
+  vlog "apply.sh, $run pass"
   set +e
   out=$(env KC_SITE_OVERRIDE="$KC_SITE" KC_PYTHON="$VENV/bin/python" \
     bash "$CHECKOUT/gateway-patches/apply.sh" ${ONLY[@]+"${ONLY[@]}"} 2>&1)
