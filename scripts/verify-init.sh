@@ -47,7 +47,6 @@
 #
 # Writes only inside --root, plus
 #   ${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}/kirocrew-verify-<name>.service
-# (and npm's download cache in ~/.npm when the frontend is built)
 # Errors: a line starting with "!! " on stderr and a non-zero exit (2 = usage).
 
 set -euo pipefail
@@ -293,14 +292,16 @@ else
   if (
     cd -- "$KC_SRC/website" || exit 1
     if [ -f package-lock.json ]; then
-      npm ci --no-audit --no-fund --loglevel=error || exit 1
+      npm ci --no-audit --no-fund --loglevel=error --cache "$ROOT/state/npm-cache" || exit 1
     else
-      npm install --no-audit --no-fund --loglevel=error || exit 1
+      npm install --no-audit --no-fund --loglevel=error --cache "$ROOT/state/npm-cache" || exit 1
     fi
     NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}" npm run build
   ) >"$FE_LOG" 2>&1 </dev/null && [ -f "$KC_SRC/website/dist/index.html" ]; then
-    mkdir -p -- "$(dirname -- "$DIST")" && cp -R -- "$KC_SRC/website/dist" "$DIST" \
-      || vdie "cannot copy $KC_SRC/website/dist to $DIST"
+    # Copy next to it, then rename: a killed copy never looks like a finished one.
+    mkdir -p -- "$(dirname -- "$DIST")" && cp -R -- "$KC_SRC/website/dist" "$DIST.tmp.$$" \
+      && mv -- "$DIST.tmp.$$" "$DIST" \
+      || vdie "cannot copy $KC_SRC/website/dist to $DIST (a partial copy may be left in $DIST.tmp.$$)"
     vlog "frontend: built into $DIST"
   else
     vwarn "the frontend build failed (log: $FE_LOG); $NO_DASHBOARD"
@@ -356,7 +357,8 @@ else
 import sys
 try:
     from kiro_crew.cli_setup import _setup_slack_tokens
-except ImportError:
+except ImportError as e:
+    print(f"-- warning: cannot import kiro_crew.cli_setup._setup_slack_tokens: {e}", file=sys.stderr)
     sys.exit(3)
 _setup_slack_tokens()'
   slack_rc=$?

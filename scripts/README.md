@@ -70,7 +70,8 @@ Builds the verify gateway under `--root`. It runs these steps in order, with
    dashboard. Without Node.js 22.12 or newer and `npm` the script only warns,
    and the gateway serves a legacy page, so the app's dashboard page cannot be
    checked. Install Node.js and run `verify-init.sh` again to add it. The build
-   output goes to `<root>/logs/frontend-<UTC timestamp>.log`.
+   output goes to `<root>/logs/frontend-<UTC timestamp>.log`, npm's download
+   cache to `<root>/state/npm-cache`.
 3. Create `<root>/venv` and `pip install` `kc-src` into it.
 4. `kirocrew config set agent.apps_allow_third_party true` and
    `kirocrew config set dashboard.url http://127.0.0.1:<port>`.
@@ -83,7 +84,8 @@ Builds the verify gateway under `--root`. It runs these steps in order, with
    also point `~/.local/bin/kirocrew` at the verify venv and install the shared
    kiro-cli agent spec. On a Kiro Crew without that function the script warns
    and you connect Slack from the verify dashboard (Settings, Messaging
-   Channels) after the first `verify-install.sh`.
+   Channels) after the first `verify-install.sh`. The wizard's slash-command
+   step is not run either, so the slash command keeps its default name.
 6. Write the systemd user unit, run `systemctl --user daemon-reload` and
    `systemctl --user enable`. The unit is **not started**: the gateway stays
    unpatched until `verify-install.sh` has run.
@@ -256,8 +258,6 @@ Outside the root, one file:
 ```text
 ${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}/kirocrew-verify-<name>.service
 ```
-
-The frontend build runs `npm`, which keeps its download cache in `~/.npm`.
 
 What the **gateway** writes outside the root. The scripts do not write these;
 the verify gateway does, as any Kiro Crew gateway does, because they belong to

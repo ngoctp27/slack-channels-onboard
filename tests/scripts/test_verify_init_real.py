@@ -499,7 +499,7 @@ def test_slack_step_never_runs_the_whole_setup_wizard(ctx: Ctx) -> None:
 def test_missing_slack_step_falls_back_to_the_dashboard(ctx: Ctx) -> None:
     r = ctx.run("--skip-unit", FAKE_NO_SLACK_STEP="1")
     assert r.returncode == 0, r.stderr
-    assert "dashboard" in r.stderr.lower()
+    assert "dashboard" in r.stderr.lower() and "_setup_slack_tokens" in r.stderr
     assert not any(c.startswith(("setup", "slack tokens")) for c in ctx.kc_calls())
     assert (ctx.root / "verify.env").exists()
 
@@ -552,7 +552,8 @@ def test_frontend_is_built_into_the_pristine_tree(ctx: Ctx) -> None:
         assert r.returncode == 0, r.stderr
         assert _dist(ctx).read_text() == "<html>\n"
         assert ctx.b.sb.calls("npm")[:2] == [
-            "ci --no-audit --no-fund --loglevel=error", "run build"]
+            f"ci --no-audit --no-fund --loglevel=error --cache {ctx.root}/state/npm-cache",
+            "run build"]
         assert list((ctx.root / "logs").glob("frontend-*.log"))
         # re-run: already built, npm is not called again
         ctx.b.sb.log.unlink(missing_ok=True)
@@ -603,5 +604,29 @@ def test_skip_frontend_never_calls_npm(ctx: Ctx) -> None:
         assert r.returncode == 0, r.stderr
         assert ">>> frontend: skipped (--skip-frontend)" in r.stdout
         assert ctx.b.sb.calls("npm") == [] and ctx.b.sb.calls("node") == []
+    finally:
+        _drop_frontend_stubs(ctx)
+
+
+@pytest.mark.parametrize("version,ok", [
+    ("22.11.0", False), ("22.12.0", True), ("23.0.1", True), ("9.99.0", False), ("100.0.0", True),
+])
+def test_frontend_node_version_floor(ctx: Ctx, version: str, ok: bool) -> None:
+    try:
+        _website(ctx); _node(ctx, version); _npm(ctx)
+        r = ctx.run("--skip-slack", "--skip-unit")
+        assert r.returncode == 0, r.stderr
+        assert _dist(ctx).exists() is ok
+        assert bool(ctx.b.sb.calls("npm")) is ok
+    finally:
+        _drop_frontend_stubs(ctx)
+
+
+def test_frontend_npm_cache_stays_under_the_root(ctx: Ctx) -> None:
+    try:
+        _website(ctx); _node(ctx); _npm(ctx)
+        assert ctx.run("--skip-slack", "--skip-unit").returncode == 0
+        ci = ctx.b.sb.calls("npm")[0]
+        assert ci.startswith("ci ") and f"--cache {ctx.root}/state/npm-cache" in ci
     finally:
         _drop_frontend_stubs(ctx)
