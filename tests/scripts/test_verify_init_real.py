@@ -511,3 +511,97 @@ def test_dry_run_with_venv_calls_nothing(ctx: Ctx) -> None:
     assert ctx.b.sb.calls("systemctl") == ["--user show-environment"]
     assert ctx.b.sb.calls("loginctl") == []
     assert not ctx.sd.exists() and not ctx.home.exists()
+
+
+# ---- dashboard frontend: website/ built into kc-src/src/kiro_crew/static/dist ----
+# node and npm are stubs; npm `run build` writes website/dist/index.html.
+
+def _website(ctx: Ctx) -> Path:
+    w = ctx.root / "kc-src" / "website"
+    w.mkdir(exist_ok=True)
+    (w / "package.json").write_text("{}\n")
+    (w / "package-lock.json").write_text("{}\n")
+    return w
+
+
+def _node(ctx: Ctx, version: str = "24.1.0") -> None:
+    ctx.b.sb.stub("node", body=f'[ "$1" = -p ] && echo {version}')
+
+
+def _npm(ctx: Ctx, build_rc: int = 0) -> None:
+    ctx.b.sb.stub("npm", body=(
+        'if [ "$1 $2" = "run build" ]; then\n'
+        f'  [ {build_rc} = 0 ] || {{ echo "vite: boom" >&2; exit {build_rc}; }}\n'
+        '  mkdir -p dist && echo "<html>" > dist/index.html\n'
+        "fi"))
+
+
+def _dist(ctx: Ctx) -> Path:
+    return ctx.root / "kc-src" / "src" / "kiro_crew" / "static" / "dist" / "index.html"
+
+
+def _drop_frontend_stubs(ctx: Ctx) -> None:
+    for n in ("node", "npm"):
+        (ctx.b.sb.stubs / n).unlink(missing_ok=True)
+
+
+def test_frontend_is_built_into_the_pristine_tree(ctx: Ctx) -> None:
+    _website(ctx); _node(ctx); _npm(ctx)
+    try:
+        r = ctx.run("--skip-slack", "--skip-unit")
+        assert r.returncode == 0, r.stderr
+        assert _dist(ctx).read_text() == "<html>\n"
+        assert ctx.b.sb.calls("npm")[:2] == [
+            "ci --no-audit --no-fund --loglevel=error", "run build"]
+        assert list((ctx.root / "logs").glob("frontend-*.log"))
+        # re-run: already built, npm is not called again
+        ctx.b.sb.log.unlink(missing_ok=True)
+        r = ctx.run("--skip-slack", "--skip-unit")
+        assert r.returncode == 0, r.stderr
+        assert ">>> frontend: skipped (already done)" in r.stdout
+        assert ctx.b.sb.calls("npm") == []
+    finally:
+        _drop_frontend_stubs(ctx)
+
+
+def test_frontend_without_node_warns_and_continues(ctx: Ctx) -> None:
+    _website(ctx)
+    _drop_frontend_stubs(ctx)
+    r = ctx.run("--skip-slack", "--skip-unit")
+    assert r.returncode == 0, r.stderr
+    assert "-- warning:" in r.stderr and "legacy" in r.stderr and "22.12" in r.stderr
+    assert not _dist(ctx).exists()
+    assert (ctx.root / "verify.env").exists()
+
+
+def test_frontend_with_old_node_warns_and_skips_npm(ctx: Ctx) -> None:
+    _website(ctx); _node(ctx, "20.11.1"); _npm(ctx)
+    try:
+        r = ctx.run("--skip-slack", "--skip-unit")
+        assert r.returncode == 0, r.stderr
+        assert "20.11.1" in r.stderr and "22.12" in r.stderr
+        assert ctx.b.sb.calls("npm") == []
+    finally:
+        _drop_frontend_stubs(ctx)
+
+
+def test_frontend_build_failure_warns_with_the_log(ctx: Ctx) -> None:
+    _website(ctx); _node(ctx); _npm(ctx, build_rc=1)
+    try:
+        r = ctx.run("--skip-slack", "--skip-unit")
+        assert r.returncode == 0, r.stderr
+        assert "-- warning:" in r.stderr and "frontend-" in r.stderr
+        assert not _dist(ctx).exists()
+    finally:
+        _drop_frontend_stubs(ctx)
+
+
+def test_skip_frontend_never_calls_npm(ctx: Ctx) -> None:
+    _website(ctx); _node(ctx); _npm(ctx)
+    try:
+        r = ctx.run("--skip-slack", "--skip-unit", "--skip-frontend")
+        assert r.returncode == 0, r.stderr
+        assert ">>> frontend: skipped (--skip-frontend)" in r.stdout
+        assert ctx.b.sb.calls("npm") == [] and ctx.b.sb.calls("node") == []
+    finally:
+        _drop_frontend_stubs(ctx)

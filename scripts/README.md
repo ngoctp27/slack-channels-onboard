@@ -43,6 +43,8 @@ applies the patches, so nothing from the previous PR stays behind.
 - Linux with a systemd **user** session (`systemctl --user show-environment`
   must work).
 - Python 3.12 or newer, and `git`.
+- Node.js 22.12 or newer and `npm`, to build the dashboard. Optional: without
+  them the gateway serves a legacy page instead of the dashboard.
 - `bwrap` (bubblewrap) if you want workspace confinement (Set T) or the
   member approval cards (Set N2). It is optional: without it the scripts print
   a warning and carry on. On Debian or Ubuntu: `sudo apt install bubblewrap`
@@ -59,12 +61,20 @@ applies the patches, so nothing from the previous PR stays behind.
 Builds the verify gateway under `--root`. It runs these steps in order, with
 `KIROCREW_HOME=<root>/home` (mode 700):
 
-1. Clone Kiro Crew at `--kc-ref` into `<root>/kc-src` (shallow). This copy stays
-   pristine; `verify-install.sh` uses it to reset the gateway.
-2. Create `<root>/venv` and `pip install` `kc-src` into it.
-3. `kirocrew config set agent.apps_allow_third_party true` and
+1. Clone Kiro Crew at `--kc-ref` into `<root>/kc-src` (shallow). Its
+   `src/kiro_crew` stays pristine; `verify-install.sh` copies it over the
+   gateway's package on every run.
+2. Build the dashboard frontend: `npm ci` and `npm run build` in
+   `kc-src/website`, then copy `website/dist` to
+   `kc-src/src/kiro_crew/static/dist`. A Kiro Crew git tag ships without a built
+   dashboard. Without Node.js 22.12 or newer and `npm` the script only warns,
+   and the gateway serves a legacy page, so the app's dashboard page cannot be
+   checked. Install Node.js and run `verify-init.sh` again to add it. The build
+   output goes to `<root>/logs/frontend-<UTC timestamp>.log`.
+3. Create `<root>/venv` and `pip install` `kc-src` into it.
+4. `kirocrew config set agent.apps_allow_third_party true` and
    `kirocrew config set dashboard.url http://127.0.0.1:<port>`.
-4. The Slack step of `kirocrew setup --slack`
+5. The Slack step of `kirocrew setup --slack`
    (`kiro_crew.cli_setup._setup_slack_tokens`). It asks for the app token, the
    bot token and your Slack member id, checks each against Slack and writes
    them to `<root>/home/.env`. It runs only when that file lacks
@@ -74,10 +84,10 @@ Builds the verify gateway under `--root`. It runs these steps in order, with
    kiro-cli agent spec. On a Kiro Crew without that function the script warns
    and you connect Slack from the verify dashboard (Settings, Messaging
    Channels) after the first `verify-install.sh`.
-5. Write the systemd user unit, run `systemctl --user daemon-reload` and
+6. Write the systemd user unit, run `systemctl --user daemon-reload` and
    `systemctl --user enable`. The unit is **not started**: the gateway stays
    unpatched until `verify-install.sh` has run.
-6. Write `<root>/verify.env`.
+7. Write `<root>/verify.env`.
 
 ```bash
 bash scripts/verify-init.sh --root /path/to/verify-root [options]
@@ -92,6 +102,7 @@ bash scripts/verify-init.sh --root /path/to/verify-root [options]
 | `--python PY` | first of `python3.12`, `python3` | Python 3.12 or newer, used for the venv. |
 | `--admin-env-file FILE` | none | File with `KIROCREW_ADMIN_USER_IDS=...`. The unit loads it as `EnvironmentFile`. The path is stored as an absolute path; the script never reads the file. |
 | `--skip-slack` | off | Do not run the Slack setup. |
+| `--skip-frontend` | off | Do not build the dashboard frontend. |
 | `--skip-unit` | off | Do not write or touch the systemd unit. |
 | `--enable-linger` | off | Also run `loginctl enable-linger`, so the unit keeps running after you log out. |
 | `--dry-run` | off | Run the preflight, print the plan, create nothing. |
@@ -230,7 +241,8 @@ Under the root:
 
 ```text
 /path/to/verify-root/
-  kc-src/        pristine Kiro Crew clone (the reset source)
+  kc-src/        Kiro Crew clone; src/kiro_crew is the reset source,
+                 website/ holds the frontend build and its node_modules
   venv/          the verify gateway's Python environment
   home/          KIROCREW_HOME of the verify gateway (mode 700, holds .env)
   checkouts/     one worktree per --pr and --branch
@@ -244,6 +256,8 @@ Outside the root, one file:
 ```text
 ${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}/kirocrew-verify-<name>.service
 ```
+
+The frontend build runs `npm`, which keeps its download cache in `~/.npm`.
 
 What the **gateway** writes outside the root. The scripts do not write these;
 the verify gateway does, as any Kiro Crew gateway does, because they belong to
@@ -287,6 +301,7 @@ lives outside the root.
 | Symptom | Cause and fix |
 |---|---|
 | `port N on 127.0.0.1 is already in use` (`verify-init.sh`) | Another process holds the port. Pick another with `verify-init.sh --port`. |
+| The dashboard is a plain legacy page, without the app's page | The frontend was not built (no Node.js 22.12+ or `npm`, or the build failed; init printed a warning with the log path). Install Node.js, run `verify-init.sh` again with the same options, then `verify-install.sh`. |
 | `bwrap not found` warning | Set T and the member approval cards of Set N2 will not work. Install bubblewrap, then run `verify-install.sh` again. |
 | `CHECK ANCHORS` in the apply log | A patch set does not match the Kiro Crew version in `kc-src`. The gateway stays stopped. Check that `--kc-ref` is a version the sets target (see `gateway-patches/README.md`), or pass a `--sets` list that fits. The log path is in the error message. |
 | The people in `admins.env` have no admin rights | The unit has no `EnvironmentFile=` line (init ran without `--admin-env-file`; run `verify-init.sh` again with it), or the file is missing or unreadable (the `-` makes systemd skip it silently). Check with `systemctl --user cat <unit>`. |

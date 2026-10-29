@@ -99,7 +99,7 @@ def test_dry_run_lists_steps_in_order_and_creates_nothing(
     r = _ok(sandbox, py312, root, "--dry-run")
     assert r.returncode == 0, r.stderr
     plan = [l for l in r.stdout.splitlines() if l.startswith("[dry-run]")]
-    labels = ["clone:", "venv+pip install:", "config set:", "slack setup:",
+    labels = ["clone:", "frontend:", "venv+pip install:", "config set:", "slack setup:",
               "write unit:", "daemon-reload:", ". enable:", "write verify.env:"]
     idx = []
     for label in labels:
@@ -257,3 +257,10 @@ def test_leading_dash_repo_url_is_usage_error(sandbox: Sandbox, py312: str, tmp_
     r = _ok(sandbox, py312, tmp_path / "r", "--dry-run", KC_REPO_URL="--upload-pack=x")
     assert r.returncode == 2
     assert "!! " in r.stderr and "KC_REPO_URL" in r.stderr
+
+
+def test_dry_run_skip_frontend(sandbox: Sandbox, py312: str, tmp_path) -> None:
+    r = _ok(sandbox, py312, tmp_path / "r", "--dry-run", "--skip-frontend")
+    assert r.returncode == 0, r.stderr
+    line = next(l for l in r.stdout.splitlines() if "frontend:" in l)
+    assert "skipped" in line

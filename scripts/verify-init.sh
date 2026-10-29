@@ -18,6 +18,7 @@
 #   --admin-env-file FILE  file with KIROCREW_ADMIN_USER_IDS=..., used by the unit
 #                          as EnvironmentFile; stored as an absolute path, never read
 #   --skip-slack           do not run the Slack setup
+#   --skip-frontend        do not build the dashboard frontend (needs Node.js >= 22.12)
 #   --skip-unit            do not write or touch the systemd unit
 #   --enable-linger        also run `loginctl enable-linger` so the unit survives logout
 #   --dry-run              run the preflight, print the plan, create nothing
@@ -26,6 +27,11 @@
 # Environment:
 #   SYSTEMD_USER_DIR       where the unit file goes (default: $HOME/.config/systemd/user)
 #   KC_REPO_URL            Kiro Crew git URL (default: https://github.com/kirodotdev/KiroCrew.git)
+#
+# Step 2 builds the dashboard frontend (website/, `npm ci` + `npm run build`) into
+# kc-src/src/kiro_crew/static/dist, the tree verify-install.sh copies over the
+# venv package. Without Node.js >= 22.12 and npm it only warns: the gateway then
+# serves a legacy page instead of the dashboard, so app pages cannot be checked.
 #
 # Steps after the venv, all with KIROCREW_HOME=<root>/home (mode 700): two
 # `kirocrew config set` calls, the Slack step of `kirocrew setup --slack`
@@ -41,6 +47,7 @@
 #
 # Writes only inside --root, plus
 #   ${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}/kirocrew-verify-<name>.service
+# (and npm's download cache in ~/.npm when the frontend is built)
 # Errors: a line starting with "!! " on stderr and a non-zero exit (2 = usage).
 
 set -euo pipefail
@@ -60,6 +67,7 @@ NAME="verify"
 PYTHON_ARG=""
 ADMIN_ENV_ARG=""
 SKIP_SLACK=0
+SKIP_FRONTEND=0
 SKIP_UNIT=0
 ENABLE_LINGER=0
 DRY_RUN=0
@@ -76,6 +84,7 @@ while [ $# -gt 0 ]; do
     --python) need_value "$1" $#; PYTHON_ARG="$2"; shift 2 ;;
     --admin-env-file) need_value "$1" $#; ADMIN_ENV_ARG="$2"; shift 2 ;;
     --skip-slack) SKIP_SLACK=1; shift ;;
+    --skip-frontend) SKIP_FRONTEND=1; shift ;;
     --skip-unit) SKIP_UNIT=1; shift ;;
     --enable-linger) ENABLE_LINGER=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -193,28 +202,35 @@ finally:
   fi
 fi
 
+NODE_MIN="22.12"
+
 # ---- plan --------------------------------------------------------------------
 if [ "$DRY_RUN" = 1 ]; then
   plan() { printf '[dry-run] %s\n' "$*"; }
   vlog "plan (nothing is created)"
   plan "1. clone: $KC_REPO_URL at $KC_REF into $KC_SRC"
-  plan "2. venv+pip install: $PY -m venv $VENV, then pip install $KC_SRC"
-  plan "3. config set: KIROCREW_HOME=$KIROCREW_HOME, gateway port $PORT, agent.apps_allow_third_party true"
-  if [ "$SKIP_SLACK" = 1 ]; then
-    plan "4. slack setup: skipped (--skip-slack)"
+  if [ "$SKIP_FRONTEND" = 1 ]; then
+    plan "2. frontend: skipped (--skip-frontend)"
   else
-    plan "4. slack setup: kiro_crew.cli_setup._setup_slack_tokens (interactive; only if $KIROCREW_HOME/.env lacks the tokens)"
+    plan "2. frontend: npm ci && npm run build in $KC_SRC/website, copied to $KC_SRC/src/kiro_crew/static/dist (needs Node.js >= $NODE_MIN)"
+  fi
+  plan "3. venv+pip install: $PY -m venv $VENV, then pip install $KC_SRC"
+  plan "4. config set: KIROCREW_HOME=$KIROCREW_HOME, gateway port $PORT, agent.apps_allow_third_party true"
+  if [ "$SKIP_SLACK" = 1 ]; then
+    plan "5. slack setup: skipped (--skip-slack)"
+  else
+    plan "5. slack setup: kiro_crew.cli_setup._setup_slack_tokens (interactive; only if $KIROCREW_HOME/.env lacks the tokens)"
   fi
   if [ "$SKIP_UNIT" = 1 ]; then
-    plan "5. write unit: skipped (--skip-unit)"
-    plan "6. daemon-reload: skipped (--skip-unit)"
-    plan "7. enable: skipped (--skip-unit)"
+    plan "6. write unit: skipped (--skip-unit)"
+    plan "7. daemon-reload: skipped (--skip-unit)"
+    plan "8. enable: skipped (--skip-unit)"
   else
-    plan "5. write unit: $UNIT_FILE${ADMIN_ENV_FILE:+ (EnvironmentFile=$ADMIN_ENV_FILE)}"
-    plan "6. daemon-reload: systemctl --user daemon-reload"
-    plan "7. enable: systemctl --user enable $UNIT"
+    plan "6. write unit: $UNIT_FILE${ADMIN_ENV_FILE:+ (EnvironmentFile=$ADMIN_ENV_FILE)}"
+    plan "7. daemon-reload: systemctl --user daemon-reload"
+    plan "8. enable: systemctl --user enable $UNIT"
   fi
-  n=8
+  n=9
   if [ "$ENABLE_LINGER" = 1 ]; then
     if [ "$SKIP_UNIT" = 1 ]; then
       plan "$n. linger: skipped (--skip-unit)"
@@ -248,7 +264,50 @@ else
     || vdie "git clone of $KC_REPO_URL at $KC_REF failed"
 fi
 
-# 2. venv and a non-editable install of the clone
+# 2. dashboard frontend, built into the pristine tree: verify-install.sh copies
+#    kc-src/src/kiro_crew over the venv package, so static/dist has to live there.
+DIST="$KC_SRC/src/kiro_crew/static/dist"
+NO_DASHBOARD="the verify gateway will serve a legacy page instead of the dashboard, so app pages cannot be checked"
+node_version_ok() {
+  local v
+  v=$(node -p 'process.versions.node' 2>/dev/null </dev/null) || return 1
+  NODE_VERSION="$v"
+  [[ "$v" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+  [ "${BASH_REMATCH[1]}" -gt 22 ] || { [ "${BASH_REMATCH[1]}" = 22 ] && [ "${BASH_REMATCH[2]}" -ge 12 ]; }
+}
+if [ "$SKIP_FRONTEND" = 1 ]; then
+  vlog "frontend: skipped (--skip-frontend)"
+elif [ -f "$DIST/index.html" ]; then
+  vlog "frontend: skipped (already done)"
+elif [ ! -f "$KC_SRC/website/package.json" ]; then
+  vwarn "$KC_SRC has no website/package.json; $NO_DASHBOARD"
+elif [ -e "$DIST" ]; then
+  vwarn "$DIST exists without index.html (an interrupted build?); remove it yourself and run verify-init.sh again. Until then $NO_DASHBOARD"
+elif ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  vwarn "Node.js >= $NODE_MIN and npm are not on PATH; $NO_DASHBOARD. Install them, then run verify-init.sh again"
+elif ! node_version_ok; then
+  vwarn "Node.js ${NODE_VERSION:-of unknown version} is older than $NODE_MIN; $NO_DASHBOARD. Install a newer one, then run verify-init.sh again"
+else
+  FE_LOG="$ROOT/logs/frontend-$(date -u +%Y%m%dT%H%M%SZ).log"
+  vlog "frontend: npm ci && npm run build in $KC_SRC/website (log: $FE_LOG)"
+  if (
+    cd -- "$KC_SRC/website" || exit 1
+    if [ -f package-lock.json ]; then
+      npm ci --no-audit --no-fund --loglevel=error || exit 1
+    else
+      npm install --no-audit --no-fund --loglevel=error || exit 1
+    fi
+    NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}" npm run build
+  ) >"$FE_LOG" 2>&1 </dev/null && [ -f "$KC_SRC/website/dist/index.html" ]; then
+    mkdir -p -- "$(dirname -- "$DIST")" && cp -R -- "$KC_SRC/website/dist" "$DIST" \
+      || vdie "cannot copy $KC_SRC/website/dist to $DIST"
+    vlog "frontend: built into $DIST"
+  else
+    vwarn "the frontend build failed (log: $FE_LOG); $NO_DASHBOARD"
+  fi
+fi
+
+# 3. venv and a non-editable install of the clone
 if [ -x "$VENV/bin/python" ]; then
   vlog "venv: skipped (already done)"
 else
@@ -265,7 +324,7 @@ fi
 KC_SITE=$("$VENV/bin/python" -c 'import kiro_crew, os; print(os.path.dirname(kiro_crew.__file__))') \
   || vdie "cannot locate the kiro_crew package in $VENV"
 
-# 3. home: Kiro Crew settings for this gateway only
+# 4. home: Kiro Crew settings for this gateway only
 kirocrew() { KIROCREW_HOME="$KIROCREW_HOME" "$VENV/bin/kirocrew" "$@"; }
 if [ ! -d "$KIROCREW_HOME" ]; then mkdir -p -m 700 -- "$KIROCREW_HOME"; fi
 kirocrew config set agent.apps_allow_third_party true \
@@ -274,7 +333,7 @@ kirocrew config set dashboard.url "http://127.0.0.1:$PORT" \
   || vdie "kirocrew config set dashboard.url failed"
 vlog "config: apps_allow_third_party=true, dashboard.url=http://127.0.0.1:$PORT"
 
-# 4. Slack tokens. The .env is only probed with grep -q; it is never printed.
+# 5. Slack tokens. The .env is only probed with grep -q; it is never printed.
 slack_tokens_set() {
   local f="$KIROCREW_HOME/.env" k
   [ -f "$f" ] || return 1
@@ -311,7 +370,7 @@ _setup_slack_tokens()'
   fi
 fi
 
-# 5. systemd user unit (written, enabled, never started: the gateway is unpatched
+# 6. systemd user unit (written, enabled, never started: the gateway is unpatched
 #    until verify-install.sh has run)
 unit_text() {
   printf '%s\n' \
