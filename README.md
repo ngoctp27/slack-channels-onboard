@@ -193,6 +193,8 @@ pip install -r requirements-dev.txt                                # aiohttp + p
 python -m pytest tests -q                                          # backend unit tests, no gateway needed
 ```
 
+To try a branch or PR on a separate gateway, see [scripts/README.md](scripts/README.md).
+
 The UI is in English and switches to Vietnamese when the browser asks for it
 (`ui/src/i18n.ts`).
 
