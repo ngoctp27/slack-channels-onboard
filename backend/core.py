@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 _MAX_NAME = 48
+_MAX_ABOUT_LEN = 250
 
 
 def slugify(raw: str) -> str:
@@ -70,6 +71,7 @@ def channel_rows(cfg: dict, bot_channels: list[dict]) -> list[dict]:
     agents = cfg.get("agents", {}) or {}
     workspaces = cfg.get("workspaces", {}) or {}
     names = {c.get("id"): c.get("name", "") for c in bot_channels if c.get("id")}
+    about = {c.get("id"): c for c in bot_channels if c.get("id")}
     rows = []
     for cid in sorted(set(names) | set(channels)):
         binding = channels.get(cid)
@@ -78,6 +80,8 @@ def channel_rows(cfg: dict, bot_channels: list[dict]) -> list[dict]:
             "name": names.get(cid, ""),
             "bot_member": cid in names,
             "configured": binding is not None,
+            "topic": str((about.get(cid) or {}).get("topic") or "")[:_MAX_ABOUT_LEN],
+            "description": str((about.get(cid) or {}).get("description") or "")[:_MAX_ABOUT_LEN],
         }
         if binding is not None:
             agent_name = binding.get("agent", "")

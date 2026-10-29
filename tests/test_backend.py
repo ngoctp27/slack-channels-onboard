@@ -93,7 +93,41 @@ def test_channel_rows_join():
     rows = {r["id"]: r for r in core.channel_rows(cfg, [{"id": "C2", "name": "two"}])}
     assert rows["C1"]["configured"] and not rows["C1"]["bot_member"]
     assert rows["C1"]["workspace_dir"] == "/srv/a" and rows["C1"]["memory_store"] == "m-a"
-    assert rows["C2"] == {"id": "C2", "name": "two", "bot_member": True, "configured": False}
+    assert rows["C2"] == {
+        "id": "C2",
+        "name": "two",
+        "bot_member": True,
+        "configured": False,
+        "topic": "",
+        "description": "",
+    }
+
+
+def test_channel_rows_topic_description():
+    rows = {
+        r["id"]: r
+        for r in core.channel_rows(
+            {"slack": {"channels": {"C1": {"agent": "a"}}}, "agents": {}, "workspaces": {}},
+            [{"id": "C3", "name": "three", "topic": "t" * 300, "description": "d"}],
+        )
+    }
+    assert rows["C3"]["topic"] == "t" * 250 and rows["C3"]["description"] == "d"
+    assert rows["C1"]["topic"] == "" and rows["C1"]["description"] == ""
+
+
+def test_bot_channels_keep_topic_and_purpose(monkeypatch):
+    monkeypatch.setattr(
+        ops,
+        "_paginate",
+        lambda *a: [
+            {"id": "C1", "name": "one", "topic": {"value": "T"}, "purpose": {"value": "P"}},
+            {"id": "C2", "name": "two"},
+        ],
+    )
+    assert ops._bot_channels_sync() == [
+        {"id": "C1", "name": "one", "topic": "T", "description": "P"},
+        {"id": "C2", "name": "two", "topic": "", "description": ""},
+    ]
 
 
 def test_mutators():

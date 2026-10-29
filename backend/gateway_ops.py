@@ -111,7 +111,16 @@ def _bot_channels_sync() -> list[dict]:
         {"types": "public_channel,private_channel", "exclude_archived": "true", "limit": 200},
         "channels",
     )
-    return [{"id": c.get("id", ""), "name": c.get("name", "")} for c in chans if c.get("id")]
+    return [
+        {
+            "id": c.get("id", ""),
+            "name": c.get("name", ""),
+            "topic": (c.get("topic") or {}).get("value", ""),
+            "description": (c.get("purpose") or {}).get("value", ""),
+        }
+        for c in chans
+        if c.get("id")
+    ]
 
 
 async def bot_channels() -> list[dict]:
