@@ -136,6 +136,16 @@ def test_vread_env_rejects_unknown_key_and_malformed(sandbox: Sandbox, tmp_path)
         assert r.stderr.startswith("!! "), body
 
 
+def test_vread_env_requires_verify_format(sandbox: Sandbox, tmp_path) -> None:
+    f = tmp_path / "verify.env"
+    f.write_text("ROOT=/r\nNAME=verify\n")
+    r = sandbox.bash(f"vread_env '{f}'")
+    assert r.returncode != 0
+    assert r.stderr.startswith("!! ") and "VERIFY_FORMAT" in r.stderr
+    f.write_text("")
+    assert sandbox.bash(f"vread_env '{f}'").returncode != 0
+
+
 def test_vread_env_missing_file(sandbox: Sandbox, tmp_path) -> None:
     r = sandbox.bash(f"vread_env '{tmp_path}/nope.env'")
     assert r.returncode != 0

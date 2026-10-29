@@ -13,7 +13,8 @@
 #                      empty, "/", $HOME, or at/under ~/.kiro/crew or the
 #                      default pipx kirocrew venv
 #   vrun CMD...        DRY_RUN=1: print "[dry-run] <quoted cmd>"; else run it
-#   vread_env FILE     parse ROOT/verify.env WITHOUT sourcing it
+#   vread_env FILE     parse ROOT/verify.env WITHOUT sourcing it (VERIFY_FORMAT=1
+#                      must be present)
 #   vwrite_env FILE    write ROOT/verify.env atomically, mode 600
 #
 # verify.env keys (one KEY=VALUE per line, value taken verbatim, no quoting):
@@ -79,7 +80,7 @@ _venv_key_ok() {
 }
 
 vread_env() {
-  local file="${1-}" line key val
+  local file="${1-}" line key val seen_format=0
   [ -f "$file" ] || vdie "env file not found: $file"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '' | '#'*) continue ;; esac
@@ -87,11 +88,13 @@ vread_env() {
     key="${BASH_REMATCH[1]}"
     val="${BASH_REMATCH[2]}"
     _venv_key_ok "$key" || vdie "unknown key '$key' in $file"
-    if [ "$key" = VERIFY_FORMAT ] && [ "$val" != 1 ]; then
-      vdie "unsupported VERIFY_FORMAT '$val' in $file"
+    if [ "$key" = VERIFY_FORMAT ]; then
+      [ "$val" = 1 ] || vdie "unsupported VERIFY_FORMAT '$val' in $file"
+      seen_format=1
     fi
     printf -v "$key" '%s' "$val"
   done <"$file"
+  [ "$seen_format" = 1 ] || vdie "VERIFY_FORMAT is missing in $file"
 }
 
 vwrite_env() {

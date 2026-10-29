@@ -198,3 +198,40 @@ def test_real_run_stops_after_preflight(sandbox: Sandbox, py312: str, tmp_path) 
     assert r.returncode == 1
     assert "not implemented yet" in r.stderr
     assert not root.exists()
+
+
+def test_dry_run_skip_unit_marks_unit_steps_skipped(sandbox: Sandbox, py312: str, tmp_path) -> None:
+    sandbox.stub("systemctl", exit_code=1)  # must not matter with --skip-unit
+    r = _ok(sandbox, py312, tmp_path / "r", "--dry-run", "--skip-unit", "--enable-linger")
+    assert r.returncode == 0, r.stderr
+    assert "systemctl" not in r.stderr
+    plan = [l for l in r.stdout.splitlines() if l.startswith("[dry-run]")]
+    for label in ("write unit:", "daemon-reload:", ". enable:", ". linger:"):
+        line = next(l for l in plan if label in l)
+        assert "skipped" in line and "--skip-unit" in line, line
+    assert sandbox.calls("systemctl") == []
+
+
+def test_skip_unit_is_documented(sandbox: Sandbox) -> None:
+    assert "--skip-unit" in sandbox.run(SCRIPT, "--help").stdout
+
+
+def test_real_run_skip_unit_does_not_need_systemctl(sandbox: Sandbox, py312: str, tmp_path) -> None:
+    sandbox.stub("systemctl", exit_code=1)
+    sandbox.hide("git")  # stop right after preflight with a git error
+    r = _ok(sandbox, py312, tmp_path / "r", "--skip-unit")
+    assert r.returncode == 1
+    assert "git" in r.stderr and "systemctl" not in r.stderr
+
+
+def test_leading_dash_ref_is_usage_error(sandbox: Sandbox, py312: str, tmp_path) -> None:
+    r = sandbox.run(SCRIPT, "--root", str(tmp_path / "r"), "--python", py312,
+                    "--kc-ref", "--upload-pack=x", "--dry-run")
+    assert r.returncode == 2
+    assert "!! " in r.stderr
+
+
+def test_leading_dash_repo_url_is_usage_error(sandbox: Sandbox, py312: str, tmp_path) -> None:
+    r = _ok(sandbox, py312, tmp_path / "r", "--dry-run", KC_REPO_URL="--upload-pack=x")
+    assert r.returncode == 2
+    assert "!! " in r.stderr and "KC_REPO_URL" in r.stderr
