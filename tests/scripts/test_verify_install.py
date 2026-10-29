@@ -4,18 +4,21 @@ A bare "remote" in tmp_path carries a commit on refs/pull/1/head and a branch
 feat/x; a local clone of it is the --repo. Git runs with an isolated config
 (tmp HOME, no system config, placeholder identity). No network is used.
 
-Until Task 6 lands, a real (non-dry) run without --no-restart ends with
-"!! not implemented yet: app + restart (Task 6)" after the reset and apply
-steps; the source tests below accept that exit and assert the checkout state
-instead. The reset and apply steps run against a fake venv, a fake pristine
-Kiro Crew tree and a fake gateway-patches/apply.sh that logs its argv and env.
+A real run goes through stop, reset, apply, the app reinstall, start, the health
+poll and the journal scan. All of it runs against a fake venv (with a real
+python wrapper and a fake kirocrew), a fake pristine Kiro Crew tree, a fake
+gateway-patches/apply.sh and stub systemctl, curl and journalctl. Every stub
+logs its argv, in order, to the one calls.log of the sandbox.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import json
+import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -24,7 +27,12 @@ import pytest
 from conftest import SCRIPTS, Sandbox
 
 SCRIPT = "verify-install.sh"
-NOT_YET = "!! not implemented yet: app + restart (Task 6)"
+# Fast health polling for the tests; the real defaults are 60 s, 5 s and 2 s.
+_RUN_ENV = {
+    "VERIFY_HEALTH_TIMEOUT": "2",
+    "VERIFY_SETTLE_SECS": "0",
+    "VERIFY_HEALTH_INTERVAL": "0.2",
+}
 _GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_AUTHOR_NAME": "placeholder",
@@ -60,7 +68,34 @@ class Fx(NamedTuple):
             full += ["--root", str(self.root)]
         if repo:
             full += ["--repo", str(self.repo)]
-        return self.sb.run(SCRIPT, *full, *args, **_GIT_ENV, **(extra or {}))
+        env = {**_GIT_ENV, **_RUN_ENV, "FAKE_CALLS_LOG": str(self.sb.log),
+               "FAKE_KC_HOME_LOG": str(self.kc_home_log), **(extra or {})}
+        return self.sb.run(SCRIPT, *full, *args, **env)
+
+    @property
+    def kc_home_log(self) -> Path:
+        return self.sb.tmp / "kirocrew-home.log"
+
+    @property
+    def journal(self) -> Path:
+        return self.sb.tmp / "journal.txt"
+
+    @property
+    def state(self) -> Path:
+        return self.root / "state" / "current.json"
+
+    @property
+    def app_dir(self) -> Path:
+        return self.root / "home" / "apps" / "slack-channels-onboard"
+
+    def calls_log(self) -> list[str]:
+        """Every stub call in order, as \"name argv\"; curl polls are collapsed."""
+        out: list[str] = []
+        for ln in self.sb.log.read_text().splitlines() if self.sb.log.exists() else []:
+            if ln.startswith("curl ") and out and out[-1].startswith("curl "):
+                continue
+            out.append(ln)
+        return out
 
     @property
     def site(self) -> Path:
@@ -128,6 +163,7 @@ _FAKE_APPLY = r"""#!/bin/bash
 log="${FAKE_APPLY_LOG:-/dev/null}"
 n=$(cat "$log.n" 2>/dev/null || echo 0); n=$((n + 1))
 if [ -n "${FAKE_APPLY_LOG:-}" ]; then echo "$n" > "$log.n"; fi
+echo "apply.sh $*" >> "${FAKE_CALLS_LOG:-/dev/null}"
 {
   echo "argv: $*"
   echo "KC_SITE_OVERRIDE=${KC_SITE_OVERRIDE-unset}"
@@ -145,6 +181,28 @@ case "$mode" in
   missing) echo "done, nothing more" ;;
 esac
 """
+
+# The fake kirocrew the script must call as VENV/bin/kirocrew. It logs argv to the
+# shared calls log and KIROCREW_HOME to its own file; FAKE_KC_FAIL=<word> makes
+# the subcommand with that name (uninstall, install, enable) fail.
+_FAKE_KIROCREW = r"""#!/bin/bash
+echo "kirocrew $*" >> "${FAKE_CALLS_LOG:-/dev/null}"
+echo "KIROCREW_HOME=${KIROCREW_HOME-unset}" >> "${FAKE_KC_HOME_LOG:-/dev/null}"
+case "$*" in *"app ${FAKE_KC_FAIL:-@@none@@}"*) echo "kirocrew: ${FAKE_KC_FAIL} failed" >&2; exit 1 ;; esac
+exit 0
+"""
+
+# systemctl: is-active answers "inactive" (exit 3) unless FAKE_ACTIVE=1
+_SYSTEMCTL_BODY = r"""case "$*" in
+  *" is-active "*) if [ "${FAKE_ACTIVE:-0}" = 1 ]; then exit 0; else exit 3; fi ;;
+esac"""
+
+# curl: fails the first FAKE_CURL_FAILS calls (all of them when "always")
+_CURL_BODY = r"""f="$(dirname "$0")/curl.count"
+n=$(cat "$f" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$f"
+if [ "${FAKE_CURL_FAILS:-0}" = always ] || [ "$n" -le "${FAKE_CURL_FAILS:-0}" ]; then
+  echo "curl: (7) Failed to connect" >&2; exit 7
+fi"""
 
 _FILES = {
     "app.json": "{}\n",
@@ -168,7 +226,9 @@ def _build_kiro_crew(root: Path) -> None:
     (site / "foo.py.bak-setb-1").write_text("stale backup\n")
     (site / "kc_confine.py").write_text("added by a patch set\n")
     (root / "venv" / "bin").mkdir(parents=True)
-    (root / "venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    py = root / "venv" / "bin" / "python"
+    py.write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@"\n')
+    py.chmod(0o755)
 
 
 @pytest.fixture
@@ -189,6 +249,15 @@ def fx(sandbox: Sandbox, tmp_path: Path) -> Fx:
     g("clone", "-q", str(remote), str(repo))
     _write_env(root)
     _build_kiro_crew(root)
+    kc = root / "venv" / "bin" / "kirocrew"
+    kc.write_text(_FAKE_KIROCREW)
+    kc.chmod(0o755)
+    (root / "home").mkdir()
+    (root / "home" / ".env").write_text(
+        "SLACK_BOT_TOKEN=xoxb-test-not-real\nSLACK_APP_TOKEN=xapp-test-not-real\n")
+    sandbox.stub("systemctl", body=_SYSTEMCTL_BODY)
+    sandbox.stub("curl", body=_CURL_BODY)
+    sandbox.stub("journalctl", body=f'cat "{tmp}/journal.txt" 2>/dev/null || true')
     fx_ = fx_._replace(sha=sha)
     before = fx_.heads()
     yield fx_
@@ -322,14 +391,14 @@ def test_pr_rerun_follows_moved_ref(fx: Fx) -> None:
     assert (d / "README.md").read_text() == "moved 1\n"
     assert f"at {new[:12]}" in r.stdout
     assert fx.worktrees().count(str(d)) == 1
-    assert NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
 
 
 def test_pr_rerun_unchanged_is_fine(fx: Fx) -> None:
     fx.install("--pr", "1")
     r = fx.install("--pr", "1")
     assert fx.head_of(fx.root / "checkouts" / "pr-1") == fx.sha
-    assert NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
 
 
 def test_dirty_checkout_is_refused_and_untouched(fx: Fx) -> None:
@@ -339,7 +408,7 @@ def test_dirty_checkout_is_refused_and_untouched(fx: Fx) -> None:
     move_pr(fx)
     r = fx.install("--pr", "1")
     assert r.returncode == 1
-    assert "!! " in r.stderr and NOT_YET not in r.stderr
+    assert "!! " in r.stderr
     assert fx.head_of(d) == fx.sha
     assert (d / "README.md").read_text() == "my edit\n"
 
@@ -350,7 +419,7 @@ def test_untracked_file_counts_as_dirty(fx: Fx) -> None:
     (d / "notes.txt").write_text("x\n")
     move_pr(fx)
     r = fx.install("--pr", "1")
-    assert "!! " in r.stderr and NOT_YET not in r.stderr
+    assert "!! " in r.stderr
     assert (d / "notes.txt").exists()
     assert fx.head_of(d) == fx.sha
 
@@ -371,7 +440,7 @@ def test_existing_dir_that_is_not_a_worktree_is_never_deleted(fx: Fx) -> None:
     (d / "keep.txt").write_text("mine\n")
     r = fx.install("--pr", "1")
     assert r.returncode == 1
-    assert "!! " in r.stderr and NOT_YET not in r.stderr
+    assert "!! " in r.stderr
     assert (d / "keep.txt").read_text() == "mine\n"
 
 
@@ -382,7 +451,7 @@ def test_worktree_of_another_repo_is_refused(fx: Fx, tmp_path: Path) -> None:
                    capture_output=True)
     r = fx.install("--pr", "1")
     assert r.returncode == 1
-    assert "!! " in r.stderr and NOT_YET not in r.stderr
+    assert "!! " in r.stderr
     assert (d / "app.json").exists()
 
 
@@ -422,7 +491,7 @@ def test_branch_dir_name_replaces_slashes(fx: Fx) -> None:
     assert fx.head_of(d) == fx.sha
     assert f">>> source: branch feat/x at {fx.sha[:12]} ({d})" in r.stdout
     assert fx.git(d, "symbolic-ref", "-q", "HEAD", check=False).returncode != 0
-    assert NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
 
 
 def test_branch_rerun_follows_remote_branch(fx: Fx) -> None:
@@ -450,7 +519,7 @@ def test_path_git_tree_makes_no_worktree(fx: Fx) -> None:
     assert not (fx.root / "checkouts").exists()
     assert fx.worktrees() == [str(fx.repo)]
     assert "DIRTY" not in r.stdout + r.stderr
-    assert NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
 
 
 def test_path_dirty_is_reported(fx: Fx) -> None:
@@ -458,14 +527,14 @@ def test_path_dirty_is_reported(fx: Fx) -> None:
     r = fx.install("--path", str(fx.repo))
     assert "DIRTY=1" in r.stdout + r.stderr
     assert (fx.repo / "README.md").read_text() == "edited\n"
-    assert NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
 
 
 def test_path_without_git_is_unknown(fx: Fx, tmp_path: Path) -> None:
     d = _plain_tree(tmp_path)
     r = fx.install("--path", str(d))
     assert "at unknown" in r.stdout
-    assert NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
     assert not (fx.root / "checkouts").exists()
 
 
@@ -475,7 +544,7 @@ def test_path_requires_the_files(fx: Fx, tmp_path: Path, missing: str) -> None:
     (d / missing).unlink()
     r = fx.install("--path", str(d))
     assert r.returncode != 0
-    assert "!! " in r.stderr and NOT_YET not in r.stderr
+    assert "!! " in r.stderr
 
 
 def test_path_must_exist(fx: Fx, tmp_path: Path) -> None:
@@ -493,7 +562,6 @@ def test_dry_run_pr_fetches_but_creates_nothing(fx: Fx) -> None:
     assert f">>> source: pr 1 at {fx.sha[:12]} ({fx.root}/checkouts/pr-1)" in r.stdout
     assert not (fx.root / "checkouts").exists()
     assert fx.worktrees() == [str(fx.repo)]
-    assert NOT_YET not in r.stderr
     plan = [ln for ln in r.stdout.splitlines() if ln.startswith("[dry-run] ")]
     text = "\n".join(plan)
     assert "git -C" in text and "worktree add" in text
@@ -607,7 +675,7 @@ def test_systemctl_stop_is_called_for_the_unit(fx: Fx) -> None:
 
 def test_stop_runs_before_the_reset(fx: Fx) -> None:
     # systemctl stub records, at call time, whether the stale file still exists
-    fx.sb.stub("systemctl", body=f'ls "{fx.site}" >> "{fx.sb.tmp}/at-stop.txt"')
+    fx.sb.stub("systemctl", body=f'ls "{fx.site}" >> "{fx.sb.tmp}/at-stop.txt"\n{_SYSTEMCTL_BODY}')
     fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
     assert "foo.py.bak-setb-1" in (fx.sb.tmp / "at-stop.txt").read_text()
 
@@ -685,13 +753,6 @@ def test_no_restart_default_sets_say_all(fx: Fx) -> None:
     r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
     after = r.stdout.split(">>> patched, gateway left stopped (--no-restart)")[1]
     assert "all" in after
-
-
-def test_without_no_restart_the_run_ends_at_task_6(fx: Fx) -> None:
-    r = fx.install("--pr", "1", extra=_apply_extra(fx))
-    assert r.returncode == 1
-    assert NOT_YET in r.stderr
-    assert len(fx.applies()) == 2  # patched before it gives up
 
 
 @pytest.mark.parametrize("mode", ["anchors", "exit1", "bang", "failed", "missing"])
@@ -881,3 +942,327 @@ def test_second_install_resets_a_previously_patched_site(fx: Fx) -> None:
     assert r.returncode == 0, r.stderr
     assert _tree(fx.site) == _tree(fx.src_pkg)
     assert len(fx.logs()) >= 1
+
+
+# ---- app reinstall, start, health, journal, state, summary -------------------
+
+UNIT = "kirocrew-verify-verify.service"
+APP = "slack-channels-onboard"
+
+
+def _install_app_dir(fx: Fx) -> None:
+    fx.app_dir.mkdir(parents=True)
+
+
+def _tags(fx: Fx) -> list[str]:
+    """The stub calls reduced to the steps the order test cares about."""
+    out = []
+    for ln in fx.calls_log():
+        if ln.startswith("curl "):
+            out.append("curl")
+        elif ln.startswith("journalctl "):
+            out.append("journalctl")
+        else:
+            out.append(ln)
+    return out
+
+
+def test_command_order_with_an_installed_app(fx: Fx) -> None:
+    _install_app_dir(fx)
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    d = fx.root / "checkouts" / "pr-1"
+    assert _tags(fx) == [
+        f"systemctl --user stop {UNIT}",
+        "apply.sh ",
+        "apply.sh ",
+        f"systemctl --user is-active --quiet {UNIT}",
+        f"kirocrew app uninstall {APP}",
+        f"kirocrew app install {d}",
+        f"kirocrew app enable {APP}",
+        f"systemctl --user start {UNIT}",
+        "curl",
+        "journalctl",
+    ]
+
+
+def test_no_uninstall_when_the_app_is_not_installed(fx: Fx) -> None:
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    kc = [c for c in _tags(fx) if c.startswith("kirocrew ")]
+    assert kc == [f"kirocrew app install {fx.root / 'checkouts' / 'pr-1'}",
+                  f"kirocrew app enable {APP}"]
+
+
+def test_every_kirocrew_call_uses_the_verify_home(fx: Fx) -> None:
+    _install_app_dir(fx)
+    fx.install("--pr", "1", extra=_apply_extra(fx))
+    homes = fx.kc_home_log.read_text().splitlines()
+    assert homes == [f"KIROCREW_HOME={fx.root}/home"] * 3
+
+
+def test_path_source_installs_the_given_dir(fx: Fx) -> None:
+    r = fx.install("--path", str(fx.repo), extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert f"kirocrew app install {fx.repo.resolve()}" in fx.calls_log()
+
+
+def test_start_curl_and_journal_arguments(fx: Fx) -> None:
+    fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert fx.sb.calls("curl")[0] == "-fsS -o /dev/null --max-time 3 http://127.0.0.1:8790/api/health"
+    (j,) = fx.sb.calls("journalctl")
+    m = re.fullmatch(rf"--user -u {UNIT} --since (\d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d) "
+                     r"--no-pager -o cat", j)
+    assert m, j
+
+
+@pytest.mark.parametrize("which", ["uninstall", "install", "enable"])
+def test_app_step_failure_is_fatal_and_nothing_starts(fx: Fx, which: str) -> None:
+    _install_app_dir(fx)
+    r = fx.install("--pr", "1", extra={**_apply_extra(fx), "FAKE_KC_FAIL": which})
+    assert r.returncode == 1
+    assert "!! " in r.stderr and which in r.stderr
+    tags = _tags(fx)
+    assert f"systemctl --user start {UNIT}" not in tags
+    assert "curl" not in tags and "journalctl" not in tags
+    assert not fx.state.exists()
+
+
+def test_app_step_refuses_a_running_unit(fx: Fx) -> None:
+    _install_app_dir(fx)
+    r = fx.install("--pr", "1", extra={**_apply_extra(fx), "FAKE_ACTIVE": "1"})
+    assert r.returncode == 1
+    assert "!! " in r.stderr and UNIT in r.stderr and "active" in r.stderr
+    assert not [c for c in _tags(fx) if c.startswith("kirocrew ")]
+    assert f"systemctl --user start {UNIT}" not in _tags(fx)
+
+
+def test_start_failure_is_fatal(fx: Fx) -> None:
+    fx.sb.stub("systemctl", body=_SYSTEMCTL_BODY +
+               '\ncase "$*" in *" start "*) echo "Job failed" >&2; exit 1 ;; esac')
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert "!! " in r.stderr and "start" in r.stderr
+    assert "curl" not in _tags(fx) and not fx.state.exists()
+
+
+def test_health_retries_until_it_answers(fx: Fx) -> None:
+    r = fx.install("--pr", "1", extra={**_apply_extra(fx), "FAKE_CURL_FAILS": "2"})
+    assert r.returncode == 0, r.stderr
+    assert len(fx.sb.calls("curl")) == 3
+
+
+def test_health_timeout_fails_shows_the_journal_and_leaves_the_gateway_running(fx: Fx) -> None:
+    fx.journal.write_text("line one of the journal\nline two of the journal\n")
+    r = fx.install("--pr", "1", extra={**_apply_extra(fx), "FAKE_CURL_FAILS": "always"})
+    assert r.returncode == 1
+    assert "!! " in r.stderr and "health" in r.stderr
+    assert "running" in r.stderr
+    assert f"journalctl --user -u {UNIT} -f" in r.stderr
+    assert "line two of the journal" in r.stdout + r.stderr
+    assert any(c.startswith(f"--user -u {UNIT} -n 40 ") for c in fx.sb.calls("journalctl"))
+    assert len(fx.sb.calls("curl")) >= 2
+    assert not any(" stop " in f" {c} " for c in fx.sb.calls("systemctl")[1:])
+    assert not fx.state.exists()
+
+
+def test_journal_traceback_fails_and_prints_the_line(fx: Fx) -> None:
+    fx.journal.write_text("all fine\nTraceback (most recent call last):\n  boom\nfine again\n")
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert "Traceback (most recent call last):" in r.stdout + r.stderr
+    assert "!! " in r.stderr and "running" in r.stderr
+    assert not fx.state.exists()
+
+
+@pytest.mark.parametrize("line", [
+    "slack-channels-onboard: ERROR cannot start",
+    "slack_channels_onboard failed to load",
+    "Slack-Channels-Onboard raised an Exception",
+    "app slack-channels-onboard: some error happened",
+])
+def test_journal_app_error_lines_fail(fx: Fx, line: str) -> None:
+    fx.journal.write_text(f"ok\n{line}\n")
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert line in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("line", [
+    "slack: some other app printed an error",
+    "kiro_crew.slack: failed to fetch channel list",
+    "slack-channels-onboard: loaded 3 channels",
+    "a traceback in lower case without the app",
+    "slack-channels-onboard: traceback lower case only",
+])
+def test_journal_unrelated_lines_pass(fx: Fx, line: str) -> None:
+    fx.journal.write_text(f"{line}\n")
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+
+
+def test_journal_prints_at_most_40_matching_lines(fx: Fx) -> None:
+    fx.journal.write_text("".join(f"Traceback number {i}\n" for i in range(100)))
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert (r.stdout + r.stderr).count("Traceback number") == 40
+
+
+def test_journal_failure_is_fatal_and_leaves_the_gateway_running(fx: Fx) -> None:
+    fx.sb.stub("journalctl", exit_code=1, body='echo "No journal files were found." >&2')
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert "!! " in r.stderr and "journal" in r.stderr and "running" in r.stderr
+    assert not fx.state.exists()
+
+
+def test_settle_wait_happens_before_the_journal_scan(fx: Fx) -> None:
+    # the journalctl stub records when it ran; the curl stub when it answered
+    fx.sb.stub("curl", body=_CURL_BODY + f'\ndate +%s.%N > "{fx.sb.tmp}/t-curl"')
+    fx.sb.stub("journalctl", body=f'date +%s.%N > "{fx.sb.tmp}/t-journal"')
+    r = fx.install("--pr", "1", extra={**_apply_extra(fx), "VERIFY_SETTLE_SECS": "1"})
+    assert r.returncode == 0, r.stderr
+    gap = float((fx.sb.tmp / "t-journal").read_text()) - float((fx.sb.tmp / "t-curl").read_text())
+    assert gap >= 1.0, gap
+
+
+@pytest.mark.parametrize("name,value", [
+    ("VERIFY_HEALTH_TIMEOUT", "abc"), ("VERIFY_HEALTH_TIMEOUT", "-1"),
+    ("VERIFY_SETTLE_SECS", "1.5"), ("VERIFY_HEALTH_INTERVAL", "x"),
+    ("VERIFY_HEALTH_INTERVAL", "0"),
+])
+def test_bad_timing_env_is_a_usage_error_before_anything_runs(fx: Fx, name: str, value: str) -> None:
+    r = fx.install("--pr", "1", extra={**_apply_extra(fx), name: value})
+    assert r.returncode == 2
+    assert "!! " in r.stderr and name in r.stderr
+    assert fx.sb.calls("systemctl") == []
+
+
+def test_state_file_fields(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--sets", "b,k", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    st = json.loads(fx.state.read_text())
+    assert st["source"] == "pr" and st["id"] == "1"
+    assert st["sha"] == fx.sha
+    assert st["dirty"] is False
+    assert st["sets"] == ["b", "k"]
+    assert st["checkout"] == str(fx.root / "checkouts" / "pr-1")
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", st["applied_at"])
+    assert st["unit"] == UNIT and st["port"] == 8790
+    assert st["apply_log"] == str(fx.logs()[0])
+    assert st["started"] is True
+    assert not list(fx.state.parent.glob("*.tmp*"))
+
+
+def test_state_sets_say_all_by_default(fx: Fx) -> None:
+    fx.install("--branch", "feat/x", extra=_apply_extra(fx))
+    st = json.loads(fx.state.read_text())
+    assert st["sets"] == "all"
+    assert st["source"] == "branch" and st["id"] == "feat/x"
+
+
+def test_state_for_a_dirty_path_source(fx: Fx) -> None:
+    (fx.repo / "README.md").write_text("changed\n")
+    r = fx.install("--path", str(fx.repo), extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    st = json.loads(fx.state.read_text())
+    assert st["source"] == "path" and st["id"] == str(fx.repo.resolve())
+    assert st["dirty"] is True
+
+
+def test_state_is_replaced_by_the_next_run(fx: Fx) -> None:
+    fx.install("--pr", "1", extra=_apply_extra(fx))
+    fx.install("--branch", "feat/x", "--sets", "b", extra=_apply_extra(fx))
+    st = json.loads(fx.state.read_text())
+    assert st["source"] == "branch" and st["sets"] == ["b"]
+
+
+def test_state_values_are_not_interpreted(fx: Fx) -> None:
+    # a --path with quotes and a dollar sign must come out verbatim
+    odd = fx.sb.tmp / "odd '\"$(x)` dir"
+    shutil.copytree(fx.repo, odd, ignore=shutil.ignore_patterns(".git"))
+    r = fx.install("--path", str(odd), extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    st = json.loads(fx.state.read_text())
+    assert st["id"] == str(odd.resolve()) and st["checkout"] == str(odd.resolve())
+
+
+def test_summary_has_the_commands_and_no_tokens(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--sets", "b,k", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert fx.sha in out
+    assert "b,k" in out
+    assert str(fx.root / "checkouts" / "pr-1") in out
+    assert "http://127.0.0.1:8790/" in out
+    assert f"journalctl --user -u {UNIT} -f" in out
+    assert f"KIROCREW_HOME={fx.root}/home {fx.root}/venv/bin/kirocrew token" in out
+    assert "none configured" in out
+    assert "gateway left stopped" not in out
+    for text in (r.stdout, r.stderr):
+        assert "xoxb-" not in text and "xapp-" not in text
+    assert [c for c in _tags(fx) if " token" in c] == []
+
+
+def test_summary_names_the_admin_env_file(fx: Fx) -> None:
+    fx.write_env(ADMIN_ENV_FILE=str(fx.root / "admins.env"))
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert str(fx.root / "admins.env") in r.stdout
+    assert "none configured" not in r.stdout
+
+
+def test_failure_output_has_no_tokens(fx: Fx) -> None:
+    fx.journal.write_text("Traceback\n")
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    for text in (r.stdout, r.stderr):
+        assert "xoxb-" not in text and "xapp-" not in text
+
+
+def test_no_restart_runs_the_app_step_but_does_not_start(fx: Fx) -> None:
+    _install_app_dir(fx)
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    d = fx.root / "checkouts" / "pr-1"
+    assert _tags(fx) == [
+        f"systemctl --user stop {UNIT}",
+        "apply.sh ",
+        "apply.sh ",
+        f"systemctl --user is-active --quiet {UNIT}",
+        f"kirocrew app uninstall {APP}",
+        f"kirocrew app install {d}",
+        f"kirocrew app enable {APP}",
+    ]
+    assert fx.sb.calls("curl") == [] and fx.sb.calls("journalctl") == []
+
+
+def test_no_restart_writes_state_with_started_false(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    st = json.loads(fx.state.read_text())
+    assert st["started"] is False
+    assert st["sha"] == fx.sha and st["sets"] == "all"
+    assert "health" not in r.stdout.lower()
+    assert "http://127.0.0.1:8790/" in r.stdout
+    assert f"KIROCREW_HOME={fx.root}/home {fx.root}/venv/bin/kirocrew token" in r.stdout
+    assert "xoxb-" not in r.stdout + r.stderr
+
+
+def test_no_restart_app_failure_is_fatal(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra={**_apply_extra(fx), "FAKE_KC_FAIL": "install"})
+    assert r.returncode == 1 and "!! " in r.stderr
+    assert not fx.state.exists()
+
+
+def test_apply_failure_runs_no_app_step(fx: Fx) -> None:
+    fx.install("--pr", "1", extra=_apply_extra(fx, "exit1"))
+    assert not [c for c in _tags(fx) if c.startswith("kirocrew ")]
+    assert not fx.state.exists()
+
+
+def test_dry_run_plan_is_numbered_1_to_9(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--dry-run")
+    nums = [ln.split(".")[0].removeprefix("[dry-run] ") for ln in r.stdout.splitlines()
+            if re.match(r"\[dry-run\] \d+\. ", ln)]
+    assert nums == [str(i) for i in range(1, 10)]
+    assert fx.sb.calls("kirocrew") == [] and not fx.state.exists()

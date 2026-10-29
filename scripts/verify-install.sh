@@ -3,10 +3,9 @@
 # Crew "verify" gateway that verify-init.sh set up.
 #
 # Repeatable: every run takes the source, checks it out under --root, resets the
-# verify gateway's kiro_crew package, applies the gateway patches and reinstalls
-# the app. Built up in steps: source, stop + reset + apply exist so far; a real
-# run without --no-restart still ends with "!! not implemented yet" after the
-# apply (the app reinstall and the restart come in a later task).
+# verify gateway's kiro_crew package, applies the gateway patches, reinstalls
+# the app, starts the gateway, waits for /api/health, scans the journal for
+# errors of the app and records the run in ROOT/state/current.json.
 #
 # Usage:
 #   scripts/verify-install.sh --root DIR (--pr N | --branch B | --path DIR) [options]
@@ -26,10 +25,36 @@
 #                    git toplevel of the directory holding this script)
 #   --remote NAME    git remote to fetch from (default: origin)
 #   --sets LIST      comma list of patch sets, e.g. b,k (default: all, no --only)
-#   --no-restart     patch (and reinstall the app) but leave the gateway stopped
+#   --no-restart     patch and reinstall the app, but leave the gateway stopped (no
+#                    start, health check or journal scan); state is written with
+#                    "started": false
 #   --dry-run        fetch and resolve the commit (this only writes FETCH_HEAD in
 #                    --repo), then print what a real run would do; creates nothing
 #   -h, --help       show this help
+#
+# Environment (whole seconds unless noted):
+#   VERIFY_HEALTH_TIMEOUT   how long to wait for /api/health after the start
+#                           (default 60)
+#   VERIFY_SETTLE_SECS      wait between the first healthy answer and the journal
+#                           scan, so late start-up errors show up (default 5)
+#   VERIFY_HEALTH_INTERVAL  seconds between two health polls, may be fractional
+#                           (default 2; the tests use 0.2)
+#
+# Steps of a real run: stop the unit, reset kiro_crew, apply.sh twice, reinstall
+# the app while the unit is stopped (`kirocrew app uninstall` when it is already
+# installed, then `install` and `enable`; with the gateway stopped Kiro Crew
+# works on the files of KIROCREW_HOME), start the unit, poll
+# http://127.0.0.1:PORT/api/health, scan `journalctl --user -u UNIT --since
+# <time of the start>` and write the state file. The scan fails the run on a
+# "Traceback" line, or a line naming slack-channels-onboard or
+# slack_channels_onboard together with error, exception or failed (the app name
+# and those words are matched without regard to case); at most 40 of the matching
+# lines are printed. A health timeout or a journal problem leaves the gateway
+# running so it can be inspected; the message says so and names the log command.
+# ROOT/state/current.json is written only by a run that got through every step
+# (source, id, sha, dirty, sets "all" or a list, checkout, applied_at in UTC,
+# unit, port, apply_log, started). `kirocrew token` is never run and the .env of
+# the verify gateway is never read: the summary prints the command only.
 #
 # Safety: writes only under --root (checkouts, logs, the venv's kiro_crew
 # package). Branches of --repo are never created, moved or deleted, and other
@@ -112,6 +137,16 @@ if [ "$SETS_GIVEN" = 1 ]; then
   [[ "$SETS" =~ ^[a-z0-9]+(,[a-z0-9]+)*$ ]] \
     || vusage_die "invalid --sets '$SETS' (use a comma list such as b,k)"
 fi
+
+HEALTH_TIMEOUT="${VERIFY_HEALTH_TIMEOUT:-60}"
+SETTLE_SECS="${VERIFY_SETTLE_SECS:-5}"
+HEALTH_INTERVAL="${VERIFY_HEALTH_INTERVAL:-2}"
+[[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] \
+  || vusage_die "invalid VERIFY_HEALTH_TIMEOUT '$HEALTH_TIMEOUT' (use whole seconds)"
+[[ "$SETTLE_SECS" =~ ^[0-9]+$ ]] \
+  || vusage_die "invalid VERIFY_SETTLE_SECS '$SETTLE_SECS' (use whole seconds)"
+[[ "$HEALTH_INTERVAL" =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] && [[ "$HEALTH_INTERVAL" =~ [1-9] ]] \
+  || vusage_die "invalid VERIFY_HEALTH_INTERVAL '$HEALTH_INTERVAL' (use seconds above 0, e.g. 2 or 0.5)"
 
 ROOT=$(vsafe_root "$ROOT_ARG") || exit $?
 ROOT_RESOLVED="$ROOT"
@@ -219,17 +254,17 @@ if [ "$DRY_RUN" = 1 ]; then
   plan "2. reset kiro_crew: replace $KC_SITE with a copy of $KC_SRC/src/kiro_crew"
   plan "3. apply.sh (first run): $APPLY"
   plan "4. apply.sh (rerun): $APPLY"
-  plan "5. reinstall app: slack-channels-onboard from $CHECKOUT into $KIROCREW_HOME (gateway stopped)"
+  plan "5. reinstall app: kirocrew app uninstall (when installed), install $CHECKOUT, enable slack-channels-onboard in $KIROCREW_HOME (gateway stopped)"
   if [ "$NO_RESTART" = 1 ]; then
     plan "6. start: skipped (--no-restart)"
     plan "7. health check: skipped (--no-restart)"
     plan "8. journal scan: skipped (--no-restart)"
   else
     plan "6. start: systemctl --user start $UNIT"
-    plan "7. health check: wait for http://127.0.0.1:$PORT"
+    plan "7. health check: wait up to ${HEALTH_TIMEOUT}s for http://127.0.0.1:$PORT/api/health"
     plan "8. journal scan: journalctl --user -u $UNIT for slack-channels-onboard errors"
   fi
-  plan "9. write state: a record of this run under $ROOT/state"
+  plan "9. write state: $ROOT/state/current.json, then print the summary"
   exit 0
 fi
 
@@ -326,12 +361,162 @@ run_apply first
 run_apply rerun
 vlog "apply.sh: All sets applied on both runs, log: $LOG"
 
+# ---- reinstall the app (the gateway is stopped) --------------------------------
+# With the unit stopped `kirocrew app ...` falls back to the files of
+# KIROCREW_HOME. A running unit would be asked over its dashboard instead, which
+# is not what this step wants, so a running unit is refused.
+if systemctl --user is-active --quiet "$UNIT" </dev/null 2>/dev/null; then
+  vdie "$UNIT is active after the stop; refusing to reinstall the app into a running gateway"
+fi
+
+kc() { env KIROCREW_HOME="$KIROCREW_HOME" "$VENV/bin/kirocrew" "$@" </dev/null; }
+
+kc_step() {
+  local out rc
+  set +e
+  out=$(kc app "$@" 2>&1)
+  rc=$?
+  set -e
+  if [ "$rc" != 0 ]; then
+    printf -- '-- output of kirocrew app %s:\n' "$*" >&2
+    tail -n 20 <<<"$out" >&2
+    vdie "kirocrew app $1 failed (exit $rc); the gateway is stopped and kiro_crew is patched"
+  fi
+}
+
+if [ -d "$KIROCREW_HOME/apps/slack-channels-onboard" ]; then
+  vlog "app: uninstall slack-channels-onboard (data is kept)"
+  kc_step uninstall slack-channels-onboard
+fi
+vlog "app: install $CHECKOUT"
+kc_step install "$CHECKOUT"
+vlog "app: enable slack-channels-onboard"
+kc_step enable slack-channels-onboard
+
+# ---- state and summary ------------------------------------------------------
+write_state() {
+  local started="$1"
+  mkdir -p -- "$ROOT/state" || vdie "cannot create $ROOT/state"
+  "$VENV/bin/python" - "$ROOT/state/current.json" "$KIND" "$ID" "$SHA" "$DIRTY" "$SETS" \
+    "$CHECKOUT" "$UNIT" "$PORT" "$LOG" "$started" <<'PY' || vdie "cannot write $ROOT/state/current.json"
+import datetime
+import json
+import os
+import sys
+
+path, kind, ident, sha, dirty, sets, checkout, unit, port, log, started = sys.argv[1:12]
+state = {
+    "source": kind,
+    "id": ident,
+    "sha": sha,
+    "dirty": dirty == "1",
+    "sets": sets.split(",") if sets else "all",
+    "checkout": checkout,
+    "applied_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "unit": unit,
+    "port": int(port),
+    "apply_log": log,
+    "started": started == "1",
+}
+tmp = f"{path}.tmp.{os.getpid()}"
+try:
+    with open(tmp, "w") as fh:
+        json.dump(state, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    raise
+PY
+}
+
+print_summary() {
+  vlog "sha: $SHA"
+  vlog "sets: ${SETS:-all}"
+  vlog "checkout: $CHECKOUT"
+  vlog "log: $LOG"
+  vlog "url: http://127.0.0.1:$PORT/"
+  vlog "gateway log: journalctl --user -u $UNIT -f"
+  vlog "dashboard token: $(printf 'KIROCREW_HOME=%q %q token' "$KIROCREW_HOME" "$VENV/bin/kirocrew")"
+  if [ -n "$ADMIN_ENV_FILE" ]; then
+    vlog "admins: KIROCREW_ADMIN_USER_IDS comes from the env file named in the unit: $ADMIN_ENV_FILE"
+  else
+    vlog "admins: none configured (no env file named in the unit)"
+  fi
+  vlog "state: $ROOT/state/current.json"
+}
+
 if [ "$NO_RESTART" = 1 ]; then
+  write_state 0
   vlog "patched, gateway left stopped (--no-restart)"
   vlog "source: $KIND $ID at ${SHA:0:12}"
-  vlog "sets: ${SETS:-all}"
-  vlog "log: $LOG"
+  print_summary
   exit 0
 fi
 
-vdie "not implemented yet: app + restart (Task 6)"
+# ---- start and check the gateway ----------------------------------------------
+LOGCMD="journalctl --user -u $UNIT -f"
+LEFT_RUNNING="the gateway is left running so you can look at it (log: $LOGCMD)"
+
+START=$(date '+%Y-%m-%d %H:%M:%S')
+vlog "start: systemctl --user start $UNIT"
+set +e
+start_out=$(systemctl --user start "$UNIT" 2>&1 </dev/null)
+start_rc=$?
+set -e
+[ "$start_rc" = 0 ] \
+  || vdie "systemctl --user start $UNIT failed (exit $start_rc): $start_out (log: $LOGCMD)"
+
+HEALTH_URL="http://127.0.0.1:$PORT/api/health"
+vlog "health: waiting up to ${HEALTH_TIMEOUT}s for $HEALTH_URL"
+t0=$SECONDS
+last_err=""
+while true; do
+  set +e
+  last_err=$(curl -fsS -o /dev/null --max-time 3 "$HEALTH_URL" 2>&1 </dev/null)
+  curl_rc=$?
+  set -e
+  [ "$curl_rc" != 0 ] || break
+  if [ $((SECONDS - t0)) -ge "$HEALTH_TIMEOUT" ]; then
+    printf -- '-- last 40 journal lines of %s:\n' "$UNIT" >&2
+    journalctl --user -u "$UNIT" -n 40 --no-pager -o cat </dev/null >&2 || true
+    vdie "no answer from $HEALTH_URL within ${HEALTH_TIMEOUT}s (last curl: ${last_err:-no output}); $LEFT_RUNNING"
+  fi
+  sleep "$HEALTH_INTERVAL"
+done
+vlog "health: ok"
+
+[ "$SETTLE_SECS" = 0 ] || sleep "$SETTLE_SECS"
+
+# ---- journal scan -------------------------------------------------------------
+set +e
+journal=$(journalctl --user -u "$UNIT" --since "$START" --no-pager -o cat </dev/null 2>&1)
+journal_rc=$?
+set -e
+[ "$journal_rc" = 0 ] \
+  || vdie "cannot read the journal of $UNIT (journalctl exit $journal_rc: $journal); $LEFT_RUNNING"
+
+hits=()
+while IFS= read -r line; do
+  low="${line,,}"
+  if [[ "$line" == *Traceback* ]]; then
+    hits+=("$line")
+  elif [[ "$low" == *slack-channels-onboard* || "$low" == *slack_channels_onboard* ]] \
+    && [[ "$low" == *error* || "$low" == *exception* || "$low" == *failed* ]]; then
+    hits+=("$line")
+  fi
+done <<<"$journal"
+
+if [ "${#hits[@]}" -gt 0 ]; then
+  shown=${#hits[@]}
+  [ "$shown" -le 40 ] || shown=40
+  printf -- '-- %d of %d journal lines that look like errors:\n' "$shown" "${#hits[@]}" >&2
+  printf '%s\n' "${hits[@]:0:40}" >&2
+  vdie "the journal of $UNIT has ${#hits[@]} error line(s) since the start; $LEFT_RUNNING"
+fi
+vlog "journal: no errors of slack-channels-onboard since the start"
+
+write_state 1
+vlog "gateway running and healthy"
+print_summary
