@@ -163,8 +163,8 @@ to ask me wherever a step says ASK.
 4. Set B (required on Kiro Crew 0.9.0 and 0.10.0, or channel turns ignore the app's
    bindings): explain what it patches and that it must be re-applied after every
    Kiro Crew update, then ASK. If yes, run
-   `bash gateway-patches/apply.sh --only b` (prefix `KC_SITE_OVERRIDE=<path to
-   kiro_crew>` if Kiro Crew is not a pipx install). If the version is not 0.9.0,
+   `bash gateway-patches/apply.sh --only b`. If `kirocrew` is not on PATH, prefix
+   `KC_PYTHON=<the venv's python>`. If the version is not 0.9.0 or 0.10.0,
    say the patches are untested there and ASK before trying. Stop on any
    "CHECK ANCHORS" or "!!" line and show it to me.
 5. Optional features: list them from the table in gateway-patches/README.md

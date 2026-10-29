@@ -55,14 +55,32 @@ Every script's header explains what it changes, why, and how to roll it back.
 ## Apply
 
 ```bash
-# pipx install (default location):
+# pipx install, or any venv whose `kirocrew` is on PATH (e.g. cloud-install.sh):
 bash gateway-patches/apply.sh
 
-# any other install: point at the installed kiro_crew package
-KC_SITE_OVERRIDE=/path/to/site-packages/kiro_crew bash gateway-patches/apply.sh
+# kirocrew not on PATH: name the gateway's interpreter
+KC_PYTHON=/path/to/venv/bin/python bash gateway-patches/apply.sh
+
+# patch a different kiro_crew tree than the one that interpreter imports
+KC_SITE_OVERRIDE=/path/to/kiro_crew bash gateway-patches/apply.sh
 
 bash gateway-patches/apply.sh --list   # the sets, in the order they run
 ```
+
+Every set finds the gateway's Python the same way (`sets/_kc_env.sh`), first
+match wins:
+
+1. `KC_PYTHON`, if set. A `KC_PYTHON` that is not Python 3.12+ with `kiro_crew`
+   importable is an error, never silently replaced.
+2. The interpreter in the shebang of `kirocrew` on `PATH`. That covers pipx and
+   a plain venv linked into `~/.local/bin`.
+3. `~/.local/share/pipx/venvs/kirocrew/bin/python`.
+
+The package it patches is `KC_SITE_OVERRIDE` if set, else that interpreter's
+`kiro_crew`. A set's import checks load the tree it just patched, not another
+install on the same host. When no interpreter is found, the set prints a line
+starting with `!!` and `apply.sh` stops; it no longer skips the set and reports
+success.
 
 Pick only what you need with `--only` (sets still run in the fixed order).
 Combinations tested on pristine 0.9.0 and 0.10.0 trees:
@@ -334,8 +352,10 @@ set anchors on text the earlier ones wrote), then clear `__pycache__`. `n2` and
 ## Tested
 
 CI applies every combination above, twice, to pristine `v0.9.0` and `v0.10.0`
-trees, and the full set runs on a live 0.10.0 gateway. Not tested on other
-versions or on Windows.
+trees, and the full set runs on a live 0.10.0 gateway. On `v0.10.0` the behaviour
+tests run twice: once with Kiro Crew in the pipx venv path, once in a plain venv
+found only through `kirocrew` on PATH (`KC_LAYOUT=venv bash tests/gateway/run.sh`).
+Not tested on other versions or on Windows.
 
 Kiro Crew's own Slack test files were run on a pristine and on a fully patched
 `v0.10.0` tree; every test that changed result is listed and traced to the set

@@ -9,6 +9,12 @@
 #   KC_REF                  Kiro Crew tag to clone when KC_SRC is unset (default v0.10.0)
 #   KC_SRC                  an existing Kiro Crew source tree; it is copied, never edited in place
 #   KC_PYTHON               interpreter used to create the venv, must be >= 3.12 (default python3)
+#   KC_LAYOUT               where Kiro Crew is installed, the way the patch sets have to find it:
+#                             pipx (default)  venv at the pipx path under a throwaway HOME;
+#                                             apply.sh gets KC_SITE_OVERRIDE
+#                             venv            venv outside the pipx path, reached through a
+#                                             `kirocrew` link on PATH (like cloud-install.sh);
+#                                             apply.sh gets no KC_SITE_OVERRIDE and no KC_PYTHON
 #   KC_UPSTREAM_REGRESSION  non-empty: also run Kiro Crew's own test suite before and after
 #                           patching and print which tests newly fail / newly pass
 #   KC_UPSTREAM_TESTS       what that run executes, relative to the Kiro Crew tree (default: the
@@ -24,6 +30,8 @@ KC_SRC="${KC_SRC:-}"
 KC_PYTHON="${KC_PYTHON:-python3}"
 KC_UPSTREAM_REGRESSION="${KC_UPSTREAM_REGRESSION:-}"
 KC_KEEP="${KC_KEEP:-}"
+KC_LAYOUT="${KC_LAYOUT:-pipx}"
+case "$KC_LAYOUT" in pipx | venv) ;; *) echo "!! KC_LAYOUT must be pipx or venv, not: $KC_LAYOUT" >&2; exit 2 ;; esac
 
 if ! "$KC_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
   echo "!! KC_PYTHON ($KC_PYTHON) must be Python 3.12 or newer (Kiro Crew requires it)" >&2
@@ -50,13 +58,23 @@ else
   git clone -q -c advice.detachedHead=false --depth 1 --branch "$KC_REF" https://github.com/kirodotdev/KiroCrew.git "$WORK/kirocrew"
 fi
 
-# The patch scripts look for the pipx venv under $HOME; give them one in $WORK.
+# A throwaway HOME either way, so the patch scripts never see the caller's own install.
 export HOME="$WORK/home"
 mkdir -p "$HOME"
-VENV="$HOME/.local/share/pipx/venvs/kirocrew"
+if [ "$KC_LAYOUT" = pipx ]; then
+  VENV="$HOME/.local/share/pipx/venvs/kirocrew"
+else
+  VENV="$WORK/venv"
+fi
 "$KC_PYTHON" -m venv "$VENV"
 PY="$VENV/bin/python"
 "$PY" -m pip install -q --disable-pip-version-check -e "$WORK/kirocrew[dev]"
+if [ "$KC_LAYOUT" = venv ]; then
+  [ -x "$VENV/bin/kirocrew" ] || { echo "!! the install did not create $VENV/bin/kirocrew" >&2; exit 1; }
+  mkdir -p "$WORK/bin"
+  ln -s "$VENV/bin/kirocrew" "$WORK/bin/kirocrew"
+  export PATH="$WORK/bin:$PATH"
+fi
 
 # Set to 1 when either upstream run did not finish; the difference below is then unreliable.
 UPSTREAM_INCOMPLETE=""
@@ -95,8 +113,20 @@ if [ -n "$KC_UPSTREAM_REGRESSION" ]; then
   run_upstream "$WORK/upstream-pristine.txt"
 fi
 
-echo ">>> applying gateway-patches"
-KC_SITE_OVERRIDE="$WORK/kirocrew/src/kiro_crew" bash "$ROOT/gateway-patches/apply.sh" >"$WORK/apply.log" 2>&1 || true
+echo ">>> applying gateway-patches (layout: $KC_LAYOUT)"
+if [ "$KC_LAYOUT" = pipx ]; then
+  # KC_PYTHON here means "interpreter that builds the venv"; the sets read it as "gateway
+  # interpreter", so it is never passed on.
+  env -u KC_PYTHON KC_SITE_OVERRIDE="$WORK/kirocrew/src/kiro_crew" bash "$ROOT/gateway-patches/apply.sh" >"$WORK/apply.log" 2>&1 || true
+else
+  for _run in first rerun; do
+    env -u KC_SITE_OVERRIDE -u KC_PYTHON bash "$ROOT/gateway-patches/apply.sh" >"$WORK/apply.log" 2>&1 || true
+    if ! grep -q "All sets applied" "$WORK/apply.log" || grep -qE "CHECK ANCHORS|^!!" "$WORK/apply.log"; then
+      echo "!! apply.sh failed on the $_run run" >&2
+      break
+    fi
+  done
+fi
 if ! grep -q "All sets applied" "$WORK/apply.log" || grep -qE "CHECK ANCHORS|^!!" "$WORK/apply.log"; then
   cat "$WORK/apply.log" >&2
   echo "!! apply.sh did not apply every set" >&2
