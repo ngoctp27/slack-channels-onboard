@@ -233,6 +233,34 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
+# ---- check the reset target before touching anything ---------------------------
+# The reset is the only place the script deletes anything outside its own
+# checkouts, so every condition that makes the rm safe is checked first, before
+# the gateway is stopped.
+[ -f "$KC_SRC/src/kiro_crew/__init__.py" ] \
+  || vdie "$KC_SRC/src/kiro_crew/__init__.py not found: the pristine Kiro Crew copy is missing; run scripts/verify-init.sh --root $ROOT"
+[ -n "$VENV" ] && [ -n "$KC_SITE" ] || vdie "VENV or KC_SITE is empty in $ROOT/verify.env"
+[ ! -L "$KC_SITE" ] || vdie "refusing to reset $KC_SITE: it is a symlink"
+VENV_REAL=$(realpath -- "$VENV") || vdie "cannot resolve VENV: $VENV"
+SITE_REAL=$(realpath -m -- "$KC_SITE") || vdie "cannot resolve KC_SITE: $KC_SITE"
+SRC_PKG_REAL=$(realpath -- "$KC_SRC/src/kiro_crew") || vdie "cannot resolve $KC_SRC/src/kiro_crew"
+ROOT_REAL=$(realpath -- "$ROOT") || vdie "cannot resolve ROOT: $ROOT"
+case "$VENV_REAL" in
+  "$ROOT_REAL"/*) ;;
+  *) vdie "refusing to reset: the venv $VENV_REAL is not inside $ROOT_REAL" ;;
+esac
+case "$SITE_REAL" in
+  "$VENV_REAL"/*) ;;
+  *) vdie "refusing to reset $KC_SITE: it is not strictly inside the venv $VENV_REAL" ;;
+esac
+[ "$(basename -- "$SITE_REAL")" = kiro_crew ] \
+  || vdie "refusing to reset $SITE_REAL: its name is not kiro_crew"
+case "/${SITE_REAL#"$VENV_REAL"/}/" in
+  */site-packages/*) ;;
+  *) vdie "refusing to reset $SITE_REAL: no site-packages directory in its path" ;;
+esac
+[ "$SITE_REAL" != "$SRC_PKG_REAL" ] || vdie "refusing to reset $SITE_REAL: it is the pristine copy"
+
 # ---- stop the gateway --------------------------------------------------------
 command -v systemctl >/dev/null 2>&1 || vdie "systemctl is not on PATH"
 vlog "stop: systemctl --user stop $UNIT"
@@ -248,27 +276,6 @@ elif [ "$stop_rc" != 0 ]; then
 fi
 
 # ---- reset kiro_crew to the pristine copy -------------------------------------
-# This is the only place the script deletes anything outside its own checkouts,
-# so every condition that makes the rm safe is checked first.
-[ -f "$KC_SRC/src/kiro_crew/__init__.py" ] \
-  || vdie "$KC_SRC/src/kiro_crew/__init__.py not found: the pristine Kiro Crew copy is missing; run scripts/verify-init.sh --root $ROOT"
-[ -n "$VENV" ] && [ -n "$KC_SITE" ] || vdie "VENV or KC_SITE is empty in $ROOT/verify.env"
-[ ! -L "$KC_SITE" ] || vdie "refusing to reset $KC_SITE: it is a symlink"
-VENV_REAL=$(realpath -- "$VENV") || vdie "cannot resolve VENV: $VENV"
-SITE_REAL=$(realpath -m -- "$KC_SITE") || vdie "cannot resolve KC_SITE: $KC_SITE"
-SRC_PKG_REAL=$(realpath -- "$KC_SRC/src/kiro_crew") || vdie "cannot resolve $KC_SRC/src/kiro_crew"
-case "$SITE_REAL" in
-  "$VENV_REAL"/*) ;;
-  *) vdie "refusing to reset $KC_SITE: it is not strictly inside the venv $VENV_REAL" ;;
-esac
-[ "$(basename -- "$SITE_REAL")" = kiro_crew ] \
-  || vdie "refusing to reset $SITE_REAL: its name is not kiro_crew"
-case "/${SITE_REAL#"$VENV_REAL"/}/" in
-  */site-packages/*) ;;
-  *) vdie "refusing to reset $SITE_REAL: no site-packages directory in its path" ;;
-esac
-[ "$SITE_REAL" != "$SRC_PKG_REAL" ] || vdie "refusing to reset $SITE_REAL: it is the pristine copy"
-
 vlog "reset: $SITE_REAL <- $KC_SRC/src/kiro_crew"
 NEW_SITE="$SITE_REAL.verify-new.$$"
 mkdir -p -- "$(dirname -- "$SITE_REAL")" \
@@ -280,8 +287,10 @@ reset_fail() {
 }
 cp -r -- "$SRC_PKG_REAL" "$NEW_SITE" || reset_fail "copying $SRC_PKG_REAL failed; $SITE_REAL is unchanged"
 chmod -R u+w -- "$NEW_SITE" || reset_fail "chmod of the new copy failed; $SITE_REAL is unchanged"
-rm -rf -- "$SITE_REAL" || reset_fail "cannot remove the old $SITE_REAL"
-mv -- "$NEW_SITE" "$SITE_REAL" || reset_fail "cannot move the new copy to $SITE_REAL; the venv has no kiro_crew now, run verify-init.sh again"
+rm -rf -- "$SITE_REAL" \
+  || vdie "cannot remove the old $SITE_REAL; it may be partly deleted. The complete copy is kept in $NEW_SITE: replace $SITE_REAL with it by hand, or run verify-init.sh again"
+mv -- "$NEW_SITE" "$SITE_REAL" \
+  || vdie "cannot move the new copy to $SITE_REAL; the venv has no kiro_crew now. The complete copy is kept in $NEW_SITE: move it to $SITE_REAL by hand, or run verify-init.sh again"
 
 # ---- apply the gateway patches (twice: the second run must be a no-op) --------
 LOG="$ROOT/logs/apply-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -292,7 +301,7 @@ if [ -n "$SETS" ]; then ONLY=(--only "$SETS"); fi
 run_apply() {
   local run="$1" out rc cmd why=""
   cmd="env KC_SITE_OVERRIDE=$KC_SITE KC_PYTHON=$VENV/bin/python bash $CHECKOUT/gateway-patches/apply.sh${SETS:+ --only $SETS}"
-  vlog "apply.sh ($run run)"
+  vlog "apply.sh: $run run"
   set +e
   out=$(env KC_SITE_OVERRIDE="$KC_SITE" KC_PYTHON="$VENV/bin/python" \
     bash "$CHECKOUT/gateway-patches/apply.sh" ${ONLY[@]+"${ONLY[@]}"} 2>&1)

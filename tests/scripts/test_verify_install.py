@@ -766,6 +766,43 @@ def test_site_outside_the_venv_is_refused_and_nothing_is_deleted(
     assert fx.applies() == []
 
 
+@pytest.mark.parametrize("via", ["plain", "symlinked-venv"])
+def test_venv_outside_root_is_refused_and_nothing_is_deleted(
+        fx: Fx, tmp_path: Path, via: str) -> None:
+    """A verify.env that points VENV and KC_SITE away from --root is never reset."""
+    other = tmp_path / "other-venv"
+    site = other / "lib" / "site-packages" / "kiro_crew"
+    site.mkdir(parents=True)
+    (site / "precious.txt").write_text("keep\n")
+    if via == "plain":
+        fx.write_env(VENV=str(other), KC_SITE=str(site))
+    else:  # a venv inside the root that is a link to one outside it
+        link = fx.root / "linked-venv"
+        link.symlink_to(other)
+        fx.write_env(VENV=str(link), KC_SITE=str(link / "lib" / "site-packages" / "kiro_crew"))
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert "!! refusing to reset: the venv" in r.stderr and "is not inside" in r.stderr
+    assert (site / "precious.txt").read_text() == "keep\n"
+    assert not list(other.rglob("*.verify-new.*"))
+    assert fx.applies() == []
+
+
+@pytest.mark.parametrize("what", ["outside-root", "other-name", "missing-pristine"])
+def test_refused_reset_does_not_stop_the_gateway(fx: Fx, tmp_path: Path, what: str) -> None:
+    if what == "outside-root":
+        other = tmp_path / "other-venv"
+        (other / "lib" / "site-packages" / "kiro_crew").mkdir(parents=True)
+        fx.write_env(VENV=str(other), KC_SITE=str(other / "lib" / "site-packages" / "kiro_crew"))
+    elif what == "other-name":
+        fx.write_env(KC_SITE=str(fx.root / "venv" / "lib" / "site-packages" / "other"))
+    else:
+        (fx.src_pkg / "__init__.py").unlink()
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1 and "!! " in r.stderr
+    assert fx.sb.calls("systemctl") == []
+
+
 def test_site_that_is_a_symlink_is_refused(fx: Fx, tmp_path: Path) -> None:
     real = tmp_path / "real-kiro-crew"
     real.mkdir()
