@@ -62,15 +62,13 @@
 # *.bak-setn3-<stamp> files.
 # ============================================================================
 set -uo pipefail
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set N3: venv not found — skipping"; exit 0; }
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set N3" || exit 1
 FOUND=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$SITE/__init__.py" 2>/dev/null | head -1)
 grep -qx '__version__ = "0.10.0"' "$SITE/__init__.py" 2>/dev/null \
   || { echo "Set N3: Kiro Crew ${FOUND:-unknown} is not 0.10.0 — CHECK ANCHORS"; exit 1; }
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
 STAMP=$(date +%Y%m%d-%H%M%S)
 
-"$VENV_PY" - "$SITE" "$STAMP" <<'PY'
+"$KC_PY" - "$SITE" "$STAMP" <<'PY'
 import sys, pathlib, shutil, py_compile
 site, stamp = pathlib.Path(sys.argv[1]), sys.argv[2]
 MARK = "_kc_member_controls_v1"

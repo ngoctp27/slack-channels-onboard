@@ -1,7 +1,8 @@
 """Set T (_kc_workspace_confine_v1): per-channel OS confinement of the agent process.
 
-Installed into the pipx venv as ``kiro_crew/_kc_confine.py`` by
-``~/.kiro/crew/repatch-set-t-workspace-confine.sh``. Local patch, not upstream.
+Installed into the gateway's ``kiro_crew`` package (pipx venv or any other venv)
+as ``kiro_crew/_kc_confine.py`` by ``gateway-patches/sets/repatch-set-t-workspace-confine.sh``.
+Local patch, not upstream.
 
 WHAT
     An agent process spawned for a Slack channel that has maintainers in

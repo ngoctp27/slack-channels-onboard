@@ -20,12 +20,7 @@
 # ============================================================================
 set -uo pipefail
 
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-if [ -z "$SITE" ]; then
-  echo "Set K: installed kirocrew venv not found — skipping"
-  exit 0
-fi
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set K" || exit 1
 HD="$SITE/slack/handler.py"
 # 0.9.0+: the predicate moved to slack/handler_runtime/access.py (composed onto handler).
 if [ -f "$SITE/slack/handler_runtime/access.py" ] && grep -q "^def is_allowed_user" "$SITE/slack/handler_runtime/access.py"; then
@@ -118,15 +113,10 @@ PY
 rc2=$?
 
 # ---- compile both ----------------------------------------------------------
-if [ -n "$VENV_PY" ]; then
-  "$VENV_PY" -m py_compile "$HD" "$GW" && echo "Set K: compile OK" || { echo "Set K: compile FAILED"; exit 1; }
-else
-  python3 -m py_compile "$HD" "$GW" && echo "Set K: compile OK (fallback python3)"
-fi
+"$KC_PY" -m py_compile "$HD" "$GW" && echo "Set K: compile OK" || { echo "Set K: compile FAILED"; exit 1; }
 
 # ---- prove: an allowlisted non-owner is authorized, a stranger is not ------
-if [ -n "$VENV_PY" ]; then
-  "$VENV_PY" - <<'PY'
+"$KC_PY" - <<'PY'
 from kiro_crew.slack import handler as h
 h.set_allowed_users({"UOWNER", "UALLOWED"})
 # monkeypatch is_owner to a known owner
@@ -147,4 +137,3 @@ finally:
 print(f"Set K: owner={owner_ok} allowed={allowed_ok} stranger_denied={stranger_no} empty_owner_only={empty_owner}")
 import sys; sys.exit(0 if (owner_ok and allowed_ok and stranger_no and empty_owner) else 1)
 PY
-fi

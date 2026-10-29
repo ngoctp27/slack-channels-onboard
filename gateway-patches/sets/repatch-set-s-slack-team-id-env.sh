@@ -23,12 +23,10 @@
 # ============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set S: venv not found — skipping"; exit 0; }
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set S" || exit 1
 STAMP=$(date +%Y%m%d-%H%M%S)
 
-"$VENV_PY" - "$SITE" "$STAMP" "$HERE/patch-src/slack_team_ids.py" <<'PY'
+"$KC_PY" - "$SITE" "$STAMP" "$HERE/patch-src/slack_team_ids.py" <<'PY'
 import sys, pathlib, shutil, py_compile
 site, stamp, src = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
 MARK = "_kc_slack_team_env_v1"

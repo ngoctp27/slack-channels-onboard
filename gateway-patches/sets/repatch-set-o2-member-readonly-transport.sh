@@ -26,9 +26,7 @@
 # the gateway down once (2026-10-16). Idempotent via _kc_member_readonly_v2.
 # ============================================================================
 set -uo pipefail
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set O2: venv not found — skipping"; exit 0; }
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set O2" || exit 1
 TD="$SITE/slack/transport_dispatch.py"
 [ -f "$TD" ] || { echo "Set O2: $TD not found — layout changed"; exit 1; }
 
@@ -106,7 +104,7 @@ print("Set O2 [transport_dispatch.py]: OK")
 PY
 rc=$?; [ $rc -eq 0 ] || exit $rc
 
-PYBIN="${VENV_PY:-python3}"
+PYBIN="$KC_PY"
 "$PYBIN" -m py_compile "$TD" && echo "Set O2: compile OK" || { echo "Set O2: compile FAILED"; exit 1; }
 # Exit status, not grep: under pipefail the old "| grep && fail || ok" printed OK on a failed import.
 if _kc_out=$("$PYBIN" -c "import kiro_crew.slack.gateway, kiro_crew.slack.transport_dispatch" 2>&1); then

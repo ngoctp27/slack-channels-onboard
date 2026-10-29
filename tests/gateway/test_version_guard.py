@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,10 @@ def test_set_refuses_other_version(name, tmp_path):
     before = _digest(site)
     script = next((REPO / "gateway-patches" / "sets").glob(f"repatch-set-{name}-*.sh"))
     r = subprocess.run(
-        ["bash", str(script)], env={**os.environ, "KC_SITE_OVERRIDE": str(site)}, capture_output=True, text=True
+        ["bash", str(script)],
+        env={**os.environ, "KC_SITE_OVERRIDE": str(site), "KC_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 1 and "CHECK ANCHORS" in r.stdout + r.stderr
     assert _digest(site) == before

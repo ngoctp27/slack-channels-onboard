@@ -109,3 +109,9 @@ jobs:
           KC_SRC: ${{ runner.temp }}/kirocrew
           KC_UPSTREAM_REGRESSION: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: bash tests/gateway/run.sh
+      - name: Behaviour tests with Kiro Crew outside the pipx path
+        if: matrix.kirocrew == 'v0.10.0'
+        env:
+          KC_SRC: ${{ runner.temp }}/kirocrew
+          KC_LAYOUT: venv
+        run: bash tests/gateway/run.sh
