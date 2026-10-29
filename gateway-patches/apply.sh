@@ -38,6 +38,10 @@ SETS=(
   s   # KIROCREW_SLACK_TEAM_ID in the agent's environment
   t   # OS confinement (bwrap) for maintainer channels
   u   # per-agent ACP backend pin (agents.<name>.acp_backend)
+  n1  # admins from KIROCREW_ADMIN_USER_IDS rank as owner on Slack (0.10.0 only)
+  n2  # members ask owner/admins for writes in confined channels (0.10.0 only)
+  n3  # members use OPTIONS, ack and stop buttons; approval clicks get a notice (0.10.0 only)
+  n4  # approvals bound to the requester's thread; approver named; dead buttons answer (0.10.0 only)
 )
 
 if [ "${1:-}" = "--only" ]; then

@@ -23,9 +23,7 @@
 # ============================================================================
 set -uo pipefail
 
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-if [ -z "$SITE" ]; then echo "Set M: installed kirocrew venv not found — skipping"; exit 0; fi
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set M" || exit 1
 HD="$SITE/slack/handler.py"
 [ -f "$HD" ] || { echo "Set M: $HD not found — layout changed; re-check anchors."; exit 1; }
 
@@ -68,11 +66,7 @@ print("Set M [handler.py]: OK")
 PY
 
 # ---- compile ---------------------------------------------------------------
-if [ -n "$VENV_PY" ]; then
-  "$VENV_PY" -m py_compile "$HD" && echo "Set M: compile OK" || { echo "Set M: compile FAILED"; exit 1; }
-else
-  python3 -m py_compile "$HD" && echo "Set M: compile OK (fallback python3)"
-fi
+"$KC_PY" -m py_compile "$HD" && echo "Set M: compile OK" || { echo "Set M: compile FAILED"; exit 1; }
 
 # ---- prove: the gate is present and shaped right ---------------------------
 # Static proof (no live Slack): the inserted gate must (a) key off a DM channel

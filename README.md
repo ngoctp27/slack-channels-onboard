@@ -55,6 +55,30 @@ only those:
 The roles file is written atomically with mode 600. User IDs are checked against
 Slack (`users:read`), so bots and deactivated accounts are refused.
 
+**Admins.** On a 0.10.0 gateway carrying Set N1, the people listed in the
+`KIROCREW_ADMIN_USER_IDS` environment variable (comma-separated Slack user ids)
+rank as the owner on Slack: they approve cards and use the owner commands.
+Set it in the gateway's service definition (launchd plist or systemd unit). A
+`kirocrew restart` from a shell that lacks the variable drops the admins (fail
+closed). Admins cannot enter a linked dashboard thread (their message there is
+dropped and answered with a refusal), turn YOLO on or renew it, get a dashboard
+link, or link a thread to the dashboard (`!link-to-dashboard` and the "Link to
+Dashboard" button); only the primary owner can, and `!dashboard` is now
+primary-owner-only too. A thread an admin opens runs unconfined, like the
+owner's. A mention in an approval card only notifies admins who are in that
+channel.
+
+**Members asking for approval.** On a 0.10.0 gateway carrying Set N2, a member
+can ask the owner and admins to approve a file edit, delete or move, a shell
+command, or a GET web fetch to a public host. The bot posts a card that
+mentions them; only they can press it, and a member never gets a lasting rule.
+This works only in a channel whose agent runs in the Set T sandbox. Anywhere
+else the request is denied without a card. That needs a Linux gateway with
+`bwrap` installed; without it members are never asked. A channel that has only
+members (no maintainer) must have `"confine": true` in its roles entry to be
+sandboxed. See [`gateway-patches/`](gateway-patches/README.md) for the exact
+rules.
+
 These controls exist only on a gateway carrying the patch sets in
 [`gateway-patches/`](gateway-patches/README.md). Read that page before applying
 them: they change who may use the bot, target Kiro Crew 0.9.0 and 0.10.0, and must be
@@ -139,8 +163,8 @@ to ask me wherever a step says ASK.
 4. Set B (required on Kiro Crew 0.9.0 and 0.10.0, or channel turns ignore the app's
    bindings): explain what it patches and that it must be re-applied after every
    Kiro Crew update, then ASK. If yes, run
-   `bash gateway-patches/apply.sh --only b` (prefix `KC_SITE_OVERRIDE=<path to
-   kiro_crew>` if Kiro Crew is not a pipx install). If the version is not 0.9.0,
+   `bash gateway-patches/apply.sh --only b`. If `kirocrew` is not on PATH, prefix
+   `KC_PYTHON=<the venv's python>`. If the version is not 0.9.0 or 0.10.0,
    say the patches are untested there and ASK before trying. Stop on any
    "CHECK ANCHORS" or "!!" line and show it to me.
 5. Optional features: list them from the table in gateway-patches/README.md
@@ -192,6 +216,8 @@ cd ui && npm ci && npm run build && rm -rf node_modules && cd ..   # ui/dist is 
 pip install -r requirements-dev.txt                                # aiohttp + pytest
 python -m pytest tests -q                                          # backend unit tests, no gateway needed
 ```
+
+To try a branch or PR on a separate gateway, see [scripts/README.md](scripts/README.md).
 
 The UI is in English and switches to Vietnamese when the browser asks for it
 (`ui/src/i18n.ts`).

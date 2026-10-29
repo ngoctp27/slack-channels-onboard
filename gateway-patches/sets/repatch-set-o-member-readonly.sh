@@ -35,9 +35,7 @@
 # ============================================================================
 set -uo pipefail
 
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-if [ -z "$SITE" ]; then echo "Set O: installed kirocrew venv not found — skipping"; exit 0; fi
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set O" || exit 1
 HD="$SITE/slack/handler.py"
 [ -f "$HD" ] || { echo "Set O: $HD not found — layout changed; re-check anchors."; exit 1; }
 
@@ -132,11 +130,7 @@ p.write_text(s)
 print("Set O: OK (L1 handle_message + L2 handle_interaction + import)")
 PY
 
-if [ -n "$VENV_PY" ]; then
-  "$VENV_PY" -m py_compile "$HD" && echo "Set O: compile OK" || { echo "Set O: compile FAILED"; exit 1; }
-else
-  python3 -m py_compile "$HD" && echo "Set O: compile OK (fallback python3)"
-fi
+"$KC_PY" -m py_compile "$HD" && echo "Set O: compile OK" || { echo "Set O: compile FAILED"; exit 1; }
 
 # ---- prove (static): both layers present and shaped right ------------------
 python3 - "$HD" <<'PY'

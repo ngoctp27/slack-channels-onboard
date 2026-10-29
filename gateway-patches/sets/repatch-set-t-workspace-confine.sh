@@ -32,13 +32,11 @@
 # ============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set T: venv not found — skipping"; exit 0; }
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set T" || exit 1
 STAMP=$(date +%Y%m%d-%H%M%S)
 command -v bwrap >/dev/null || echo "Set T: WARNING bwrap not installed — confinement inert (strict gate stays)"
 
-"$VENV_PY" - "$SITE" "$STAMP" "$HERE/patch-src/kc_confine.py" <<'PY'
+"$KC_PY" - "$SITE" "$STAMP" "$HERE/patch-src/kc_confine.py" <<'PY'
 import sys, pathlib, shutil, py_compile
 site, stamp, src = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
 MARK = "_kc_workspace_confine_v1"
@@ -189,7 +187,7 @@ PY
 rc=$?; [ $rc -eq 0 ] || exit $rc
 
 # Prove: module imports in the venv, channel resolution works, and an escape probe fails.
-"$VENV_PY" - <<'PY' || { echo "Set T: PROVE FAILED"; exit 1; }
+"$KC_PY" - <<'PY' || { echo "Set T: PROVE FAILED"; exit 1; }
 import os, subprocess, json, pathlib
 from kiro_crew import _kc_confine as k
 _rp = k.CREW / "channel-roles.json"

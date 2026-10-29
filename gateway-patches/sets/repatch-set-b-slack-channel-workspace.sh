@@ -23,8 +23,7 @@
 # *.bak-setb-<stamp> files, clear __pycache__, restart.
 # ============================================================================
 set -euo pipefail
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set B: venv not found — skipping"; exit 0; }
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set B" || exit 1
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 python3 - "$SITE" "$STAMP" <<'PY'
@@ -117,5 +116,5 @@ print("Set B (slack channel workspace):", "OK" if ok_b else "CHECK ANCHORS")
 sys.exit(0 if ok_b else 1)
 PY
 
-PYBIN=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || command -v python3)
+PYBIN="$KC_PY"
 "$PYBIN" -m py_compile "$SITE/slack/transport_dispatch.py" "$SITE/slack/handler.py" && echo "Set B compile OK"

@@ -47,12 +47,10 @@
 # clear __pycache__, restart the gateway.
 # ============================================================================
 set -uo pipefail
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set U: venv not found — skipping"; exit 0; }
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python 2>/dev/null || command -v python3)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set U" || exit 1
 STAMP=$(date +%Y%m%d-%H%M%S)
 
-"$VENV_PY" - "$SITE" "$STAMP" <<'PY'
+"$KC_PY" - "$SITE" "$STAMP" <<'PY'
 import pathlib, py_compile, re, shutil, sys
 
 site = pathlib.Path(sys.argv[1])

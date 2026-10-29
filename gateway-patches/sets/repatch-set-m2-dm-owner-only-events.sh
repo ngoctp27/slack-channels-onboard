@@ -14,9 +14,7 @@
 # Idempotent via the _kc_dm_owner_only_v2 marker. Anchor verified on 0.8.0.
 # ============================================================================
 set -uo pipefail
-SITE=${KC_SITE_OVERRIDE:-}; [ -n "$SITE" ] || SITE=$(python3 -c "import pathlib; g=list(pathlib.Path.home().joinpath('.local/share/pipx/venvs/kirocrew/lib').glob('python*/site-packages/kiro_crew')); print(g[0] if g else '')")
-[ -n "$SITE" ] || { echo "Set M2: venv not found — skipping"; exit 0; }
-VENV_PY=$(ls "$HOME"/.local/share/pipx/venvs/kirocrew/bin/python* 2>/dev/null | head -1 || true)
+source "$(dirname "${BASH_SOURCE[0]}")/_kc_env.sh"; kc_env "Set M2" || exit 1
 EV="$SITE/slack/events.py"
 [ -f "$EV" ] || { echo "Set M2: $EV not found — layout changed"; exit 1; }
 
@@ -51,7 +49,7 @@ print("Set M2 [events.py]: OK")
 PY
 rc=$?; [ $rc -eq 0 ] || exit $rc
 
-PYBIN="${VENV_PY:-python3}"
+PYBIN="$KC_PY"
 "$PYBIN" -m py_compile "$EV" && echo "Set M2: compile OK" || { echo "Set M2: compile FAILED"; exit 1; }
 # Import check: a broken import here takes the whole gateway down on restart.
 # Exit status, not grep: under pipefail the old "| grep && fail || ok" printed OK on a failed import.
