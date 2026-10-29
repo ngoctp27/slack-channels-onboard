@@ -4,9 +4,11 @@ A bare "remote" in tmp_path carries a commit on refs/pull/1/head and a branch
 feat/x; a local clone of it is the --repo. Git runs with an isolated config
 (tmp HOME, no system config, placeholder identity). No network is used.
 
-Until Task 5 lands, a real (non-dry) run ends with "!! not implemented yet"
-after the source step; the tests below accept that exit and assert the
-checkout state instead.
+Until Task 6 lands, a real (non-dry) run without --no-restart ends with
+"!! not implemented yet: app + restart (Task 6)" after the reset and apply
+steps; the source tests below accept that exit and assert the checkout state
+instead. The reset and apply steps run against a fake venv, a fake pristine
+Kiro Crew tree and a fake gateway-patches/apply.sh that logs its argv and env.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import pytest
 from conftest import SCRIPTS, Sandbox
 
 SCRIPT = "verify-install.sh"
-NOT_YET = "!! not implemented yet"
+NOT_YET = "!! not implemented yet: app + restart (Task 6)"
 _GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_AUTHOR_NAME": "placeholder",
@@ -51,13 +53,40 @@ class Fx(NamedTuple):
             raise AssertionError(f"git {args} failed: {r.stderr}")
         return r
 
-    def install(self, *args: str, repo: bool = True, root: bool = True) -> subprocess.CompletedProcess:
+    def install(self, *args: str, repo: bool = True, root: bool = True,
+                extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         full: list[str] = []
         if root:
             full += ["--root", str(self.root)]
         if repo:
             full += ["--repo", str(self.repo)]
-        return self.sb.run(SCRIPT, *full, *args, **_GIT_ENV)
+        return self.sb.run(SCRIPT, *full, *args, **_GIT_ENV, **(extra or {}))
+
+    @property
+    def site(self) -> Path:
+        return self.root / "venv" / "lib" / "site-packages" / "kiro_crew"
+
+    @property
+    def src_pkg(self) -> Path:
+        return self.root / "kc-src" / "src" / "kiro_crew"
+
+    @property
+    def apply_log(self) -> Path:
+        return self.sb.tmp / "apply-calls.log"
+
+    def applies(self) -> list[str]:
+        """argv lines the fake apply.sh logged, one per run."""
+        if not self.apply_log.exists():
+            return []
+        return [ln for ln in self.apply_log.read_text().splitlines() if ln.startswith("argv:")]
+
+    def logs(self) -> list[Path]:
+        d = self.root / "logs"
+        return sorted(d.glob("apply-*.log")) if d.is_dir() else []
+
+    def write_env(self, **overrides: str) -> None:
+        """Rewrite verify.env with OVERRIDES applied to the defaults."""
+        _write_env(self.root, **overrides)
 
     def commit(self, files: dict[str, str], msg: str = "c") -> str:
         for rel, text in files.items():
@@ -79,7 +108,7 @@ class Fx(NamedTuple):
         return self.git(d, "rev-parse", "HEAD").stdout.strip()
 
 
-def _write_env(root: Path) -> None:
+def _write_env(root: Path, **overrides: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     kv = {
         "VERIFY_FORMAT": "1", "ROOT": str(root), "NAME": "verify", "PORT": "8790",
@@ -88,14 +117,58 @@ def _write_env(root: Path) -> None:
         "KIROCREW_HOME": f"{root}/home", "UNIT": "kirocrew-verify-verify.service",
         "UNIT_FILE": f"{root}/unit.service", "ADMIN_ENV_FILE": "",
     }
+    kv.update(overrides)
     (root / "verify.env").write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
 
 
+# A fake apply.sh. FAKE_APPLY_LOG gets one "argv:" line per run plus the env it
+# saw; FAKE_APPLY_MODE picks the behaviour; "second-*" modes only misbehave on
+# the second call.
+_FAKE_APPLY = r"""#!/bin/bash
+log="${FAKE_APPLY_LOG:-/dev/null}"
+n=$(cat "$log.n" 2>/dev/null || echo 0); n=$((n + 1))
+if [ -n "${FAKE_APPLY_LOG:-}" ]; then echo "$n" > "$log.n"; fi
+{
+  echo "argv: $*"
+  echo "KC_SITE_OVERRIDE=${KC_SITE_OVERRIDE-unset}"
+  echo "KC_PYTHON=${KC_PYTHON-unset}"
+  echo "stale_present=$(ls "$KC_SITE_OVERRIDE" 2>/dev/null | grep -c bak-setb || true)"
+} >> "$log"
+mode="${FAKE_APPLY_MODE:-ok}"
+case "$mode" in second-*) if [ "$n" -ge 2 ]; then mode="${mode#second-}"; else mode=ok; fi ;; esac
+case "$mode" in
+  ok) echo "applying"; echo "All sets applied" ;;
+  anchors) echo "CHECK ANCHORS in foo.py"; echo "All sets applied" ;;
+  exit1) echo "boom happened"; echo "All sets applied"; exit 1 ;;
+  bang) echo "!! x went wrong"; echo "All sets applied" ;;
+  failed) echo "set b FAILED"; echo "All sets applied" ;;
+  missing) echo "done, nothing more" ;;
+esac
+"""
+
 _FILES = {
     "app.json": "{}\n",
-    "gateway-patches/apply.sh": "#!/bin/sh\necho ok\n",
+    "gateway-patches/apply.sh": _FAKE_APPLY,
     "README.md": "one\n",
 }
+
+
+def _build_kiro_crew(root: Path) -> None:
+    """A pristine kiro_crew in kc-src and a stale one in the venv's site-packages."""
+    src = root / "kc-src" / "src" / "kiro_crew"
+    (src / "sub").mkdir(parents=True)
+    (src / "__init__.py").write_text("# pristine\n")
+    (src / "gateway.py").write_text("pristine gateway\n")
+    (src / "sub" / "mod.py").write_text("pristine mod\n")
+    site = root / "venv" / "lib" / "site-packages" / "kiro_crew"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("# patched\n")
+    (site / "gateway.py").write_text("patched gateway\n")
+    (site / "gateway.py.bak-seta-1").write_text("backup\n")
+    (site / "foo.py.bak-setb-1").write_text("stale backup\n")
+    (site / "kc_confine.py").write_text("added by a patch set\n")
+    (root / "venv" / "bin").mkdir(parents=True)
+    (root / "venv" / "bin" / "python").write_text("#!/bin/sh\n")
 
 
 @pytest.fixture
@@ -115,6 +188,7 @@ def fx(sandbox: Sandbox, tmp_path: Path) -> Fx:
       "HEAD:refs/pull/1/head", "HEAD:refs/heads/feat/x")
     g("clone", "-q", str(remote), str(repo))
     _write_env(root)
+    _build_kiro_crew(root)
     fx_ = fx_._replace(sha=sha)
     before = fx_.heads()
     yield fx_
@@ -234,7 +308,8 @@ def test_pr_creates_detached_checkout(fx: Fx) -> None:
     assert fx.git(d, "symbolic-ref", "-q", "HEAD", check=False).returncode != 0  # detached
     assert f">>> source: pr 1 at {fx.sha[:12]} ({d})" in r.stdout
     assert str(d) in fx.worktrees()
-    assert r.returncode == 1 and NOT_YET in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert ">>> patched, gateway left stopped (--no-restart)" in r.stdout
 
 
 def test_pr_rerun_follows_moved_ref(fx: Fx) -> None:
@@ -365,7 +440,7 @@ def _plain_tree(parent: Path) -> Path:
     d = parent / "plain-tree"
     (d / "gateway-patches").mkdir(parents=True)
     (d / "app.json").write_text("{}\n")
-    (d / "gateway-patches" / "apply.sh").write_text("#!/bin/sh\n")
+    (d / "gateway-patches" / "apply.sh").write_text(_FAKE_APPLY)
     return d
 
 
@@ -426,6 +501,7 @@ def test_dry_run_pr_fetches_but_creates_nothing(fx: Fx) -> None:
                  "state"):
         assert word in text, word
     assert "--only" not in text
+    assert "later steps are not implemented" not in r.stdout
 
 
 def test_dry_run_sets_and_no_restart(fx: Fx) -> None:
@@ -480,3 +556,291 @@ def test_all_runs_leave_no_stray_files_outside_root(fx: Fx) -> None:
     assert sorted(p.name for p in (fx.root / "checkouts").iterdir()) == ["branch-feat-x", "pr-1"]
     assert not list(fx.sb.home.rglob("*"))  # HOME untouched
     assert os.path.isfile(fx.root / "verify.env")
+
+
+# ---- reset and apply --------------------------------------------------------
+
+
+def _tree(d: Path) -> dict[str, str]:
+    return {str(p.relative_to(d)): p.read_text() for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+def _apply_extra(fx: Fx, mode: str = "ok") -> dict[str, str]:
+    return {"FAKE_APPLY_LOG": str(fx.apply_log), "FAKE_APPLY_MODE": mode}
+
+
+def test_reset_replaces_site_with_the_pristine_tree(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert not (fx.site / "foo.py.bak-setb-1").exists()
+    assert not (fx.site / "gateway.py.bak-seta-1").exists()
+    assert not (fx.site / "kc_confine.py").exists()
+    assert _tree(fx.site) == _tree(fx.src_pkg)
+    assert not list(fx.site.parent.glob("*.verify-new.*"))
+
+
+def test_stale_files_are_gone_before_apply_runs(fx: Fx) -> None:
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert "stale_present=0" in fx.apply_log.read_text()
+    assert "stale_present=1" not in fx.apply_log.read_text()
+
+
+def test_reset_makes_the_copy_writable(fx: Fx) -> None:
+    for p in fx.src_pkg.rglob("*.py"):
+        p.chmod(0o444)
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert all(os.access(p, os.W_OK) for p in fx.site.rglob("*") if p.is_file())
+
+
+def test_reset_creates_a_missing_site(fx: Fx) -> None:
+    shutil.rmtree(fx.site)
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert _tree(fx.site) == _tree(fx.src_pkg)
+
+
+def test_systemctl_stop_is_called_for_the_unit(fx: Fx) -> None:
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert "--user stop kirocrew-verify-verify.service" in fx.sb.calls("systemctl")
+    assert not [c for c in fx.sb.calls("systemctl") if " start " in f" {c} "]
+
+
+def test_stop_runs_before_the_reset(fx: Fx) -> None:
+    # systemctl stub records, at call time, whether the stale file still exists
+    fx.sb.stub("systemctl", body=f'ls "{fx.site}" >> "{fx.sb.tmp}/at-stop.txt"')
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert "foo.py.bak-setb-1" in (fx.sb.tmp / "at-stop.txt").read_text()
+
+
+def test_stop_exit_5_means_not_loaded_and_is_a_warning(fx: Fx) -> None:
+    fx.sb.stub("systemctl", exit_code=5, body='echo "Unit not loaded." >&2')
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert "-- warning:" in r.stderr and "not loaded" in r.stderr
+    assert _tree(fx.site) == _tree(fx.src_pkg)
+
+
+def test_stop_failure_is_fatal_and_nothing_is_reset(fx: Fx) -> None:
+    fx.sb.stub("systemctl", exit_code=1, body='echo "Failed to connect to bus" >&2')
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert "!! " in r.stderr and "kirocrew-verify-verify.service" in r.stderr
+    assert (fx.site / "foo.py.bak-setb-1").exists()
+    assert fx.applies() == []
+
+
+def test_apply_runs_twice_with_no_only_by_default(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert fx.applies() == ["argv: ", "argv: "]
+
+
+def test_apply_gets_only_with_sets(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", "--sets", "b,k", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert fx.applies() == ["argv: --only b,k", "argv: --only b,k"]
+
+
+def test_apply_env_has_site_override_and_python(fx: Fx) -> None:
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    text = fx.apply_log.read_text()
+    assert text.count(f"KC_SITE_OVERRIDE={fx.site}\n") == 2
+    assert text.count(f"KC_PYTHON={fx.root}/venv/bin/python\n") == 2
+
+
+def test_apply_runs_the_script_of_the_checkout(fx: Fx) -> None:
+    fx.commit({"gateway-patches/apply.sh": _FAKE_APPLY + "echo from-new-checkout\n"}, "new")
+    fx.git(fx.seed, "push", "-q", "--force", str(fx.remote), "HEAD:refs/pull/1/head")
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert fx.logs()[0].read_text().count("from-new-checkout") == 2
+
+
+def test_log_has_a_header_per_run_and_the_output(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", "--sets", "b", extra=_apply_extra(fx))
+    logs = fx.logs()
+    assert len(logs) == 1
+    assert logs[0].name.startswith("apply-") and logs[0].name.endswith("Z.log")
+    stamp = logs[0].name[len("apply-"):-len(".log")]
+    assert len(stamp) == 16 and stamp[8] == "T" and stamp[-1] == "Z"
+    text = logs[0].read_text()
+    heads = [ln for ln in text.splitlines() if ln.startswith("=== apply.sh ")]
+    assert len(heads) == 2
+    assert heads[0].startswith("=== apply.sh first run: ") and heads[0].endswith(" ===")
+    assert heads[1].startswith("=== apply.sh rerun run: ") and heads[1].endswith(" ===")
+    assert "--only b" in heads[0]
+    assert text.count("All sets applied") == 2
+    assert str(logs[0]) in r.stdout
+
+
+def test_no_restart_reports_sha_sets_and_log(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", "--sets", "b,k", extra=_apply_extra(fx))
+    assert r.returncode == 0
+    after = r.stdout.split(">>> patched, gateway left stopped (--no-restart)")[1]
+    assert fx.sha in after or fx.sha[:12] in after
+    assert "b,k" in after
+    assert str(fx.logs()[0]) in after
+
+
+def test_no_restart_default_sets_say_all(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    after = r.stdout.split(">>> patched, gateway left stopped (--no-restart)")[1]
+    assert "all" in after
+
+
+def test_without_no_restart_the_run_ends_at_task_6(fx: Fx) -> None:
+    r = fx.install("--pr", "1", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert NOT_YET in r.stderr
+    assert len(fx.applies()) == 2  # patched before it gives up
+
+
+@pytest.mark.parametrize("mode", ["anchors", "exit1", "bang", "failed", "missing"])
+def test_apply_failure_variants_fail_the_first_run(fx: Fx, mode: str) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx, mode))
+    assert r.returncode == 1
+    logs = fx.logs()
+    assert len(logs) == 1
+    assert (f"!! apply.sh failed on the first run, full log: {logs[0]}") in r.stderr
+    assert len(fx.applies()) == 1  # the rerun never starts
+    assert "=== apply.sh first run: " in logs[0].read_text()
+    assert ">>> patched" not in r.stdout
+    assert not [c for c in fx.sb.calls("systemctl") if " start " in f" {c} "]
+
+
+@pytest.mark.parametrize("mode", ["anchors", "exit1", "bang", "failed", "missing"])
+def test_apply_failure_variants_fail_the_rerun(fx: Fx, mode: str) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx, f"second-{mode}"))
+    assert r.returncode == 1
+    assert "!! apply.sh failed on the rerun run, full log: " in r.stderr
+    assert len(fx.applies()) == 2
+    text = fx.logs()[0].read_text()
+    assert "=== apply.sh first run: " in text and "=== apply.sh rerun run: " in text
+
+
+def test_failure_prints_only_the_last_40_lines(fx: Fx) -> None:
+    noisy = _FAKE_APPLY + 'for i in {1..80}; do echo "noise line $i"; done\n'
+    fx.commit({"gateway-patches/apply.sh": noisy}, "noisy")
+    fx.git(fx.seed, "push", "-q", "--force", str(fx.remote), "HEAD:refs/pull/1/head")
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx, "bang"))
+    assert r.returncode == 1
+    assert "noise line 80" in r.stderr and "noise line 41" in r.stderr
+    assert "noise line 40" not in r.stderr
+
+
+def test_failure_tail_is_from_the_failing_run_only(fx: Fx) -> None:
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx, "second-exit1"))
+    assert "boom happened" in r.stderr
+    # the first (good) run printed "applying"; the tail comes from the second run only
+    assert "applying" not in r.stderr
+
+
+def test_failure_leaves_the_gateway_stopped_and_site_patched_state(fx: Fx) -> None:
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx, "exit1"))
+    assert fx.sb.calls("systemctl") == ["--user stop kirocrew-verify-verify.service"]
+    assert _tree(fx.site) == _tree(fx.src_pkg)  # the reset happened, nothing else
+
+
+@pytest.mark.parametrize("what", ["outside", "other-name", "no-site-packages", "equals-venv",
+                                  "not-under-venv-by-prefix"])
+def test_site_outside_the_venv_is_refused_and_nothing_is_deleted(
+        fx: Fx, tmp_path: Path, what: str) -> None:
+    if what == "outside":
+        target = tmp_path / "elsewhere" / "site-packages" / "kiro_crew"
+    elif what == "other-name":
+        target = fx.root / "venv" / "lib" / "site-packages" / "other"
+    elif what == "no-site-packages":
+        target = fx.root / "venv" / "lib" / "kiro_crew"
+    elif what == "equals-venv":
+        target = fx.root / "venv"
+    else:  # a sibling whose name only starts with the venv's name
+        target = fx.root / "venv2" / "lib" / "site-packages" / "kiro_crew"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "precious.txt").write_text("keep\n")
+    fx.write_env(KC_SITE=str(target))
+    before_venv = _tree(fx.root / "venv")
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1
+    assert "!! " in r.stderr
+    assert (target / "precious.txt").read_text() == "keep\n"
+    assert _tree(fx.root / "venv") == before_venv
+    assert fx.applies() == []
+
+
+def test_site_that_is_a_symlink_is_refused(fx: Fx, tmp_path: Path) -> None:
+    real = tmp_path / "real-kiro-crew"
+    real.mkdir()
+    (real / "precious.txt").write_text("keep\n")
+    shutil.rmtree(fx.site)
+    fx.site.symlink_to(real)
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1 and "!! " in r.stderr
+    assert (real / "precious.txt").read_text() == "keep\n"
+    assert fx.site.is_symlink()
+    assert fx.applies() == []
+
+
+def test_symlinked_parent_that_leaves_the_venv_is_refused(fx: Fx, tmp_path: Path) -> None:
+    outside = tmp_path / "outside-sp"
+    (outside / "kiro_crew").mkdir(parents=True)
+    (outside / "kiro_crew" / "precious.txt").write_text("keep\n")
+    shutil.rmtree(fx.site.parent)
+    fx.site.parent.symlink_to(outside)
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1 and "!! " in r.stderr
+    assert (outside / "kiro_crew" / "precious.txt").read_text() == "keep\n"
+
+
+@pytest.mark.parametrize("drop", ["init", "dir"])
+def test_pristine_tree_must_hold_init(fx: Fx, drop: str) -> None:
+    if drop == "init":
+        (fx.src_pkg / "__init__.py").unlink()
+    else:
+        shutil.rmtree(fx.src_pkg)
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 1 and "!! " in r.stderr and "__init__.py" in r.stderr
+    assert (fx.site / "foo.py.bak-setb-1").exists()
+    assert fx.applies() == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_failed_copy_keeps_the_old_site_and_leaves_no_temp_dir(fx: Fx) -> None:
+    unreadable = fx.src_pkg / "sub" / "secret.py"
+    unreadable.write_text("x\n")
+    unreadable.chmod(0)
+    try:
+        r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    finally:
+        unreadable.chmod(0o644)
+    assert r.returncode == 1 and "!! " in r.stderr
+    assert (fx.site / "foo.py.bak-setb-1").exists()
+    assert (fx.site / "gateway.py").read_text() == "patched gateway\n"
+    assert not list(fx.site.parent.glob("*.verify-new.*"))
+    assert fx.applies() == []
+
+
+def test_dry_run_stops_resets_and_applies_nothing(fx: Fx) -> None:
+    before = _tree(fx.site)
+    r = fx.install("--pr", "1", "--dry-run", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert _tree(fx.site) == before
+    assert fx.sb.calls("systemctl") == []
+    assert fx.applies() == []
+    assert not (fx.root / "logs").exists()
+    assert "[dry-run] 1. stop: systemctl --user stop kirocrew-verify-verify.service" in r.stdout
+
+
+def test_path_source_is_applied_from_in_place(fx: Fx) -> None:
+    r = fx.install("--path", str(fx.repo), "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert len(fx.applies()) == 2
+    assert fx.git(fx.repo, "status", "--porcelain").stdout == ""  # nothing written into it
+
+
+def test_second_install_resets_a_previously_patched_site(fx: Fx) -> None:
+    fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    (fx.site / "gateway.py").write_text("patched again\n")
+    (fx.site / "foo.py.bak-setb-2").write_text("backup\n")
+    r = fx.install("--pr", "1", "--no-restart", extra=_apply_extra(fx))
+    assert r.returncode == 0, r.stderr
+    assert _tree(fx.site) == _tree(fx.src_pkg)
+    assert len(fx.logs()) >= 1

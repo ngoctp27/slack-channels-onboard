@@ -4,8 +4,9 @@
 #
 # Repeatable: every run takes the source, checks it out under --root, resets the
 # verify gateway's kiro_crew package, applies the gateway patches and reinstalls
-# the app. Only the source step exists so far (Task 4 of the plan): a real run
-# ends with "!! not implemented yet" once the checkout is in place.
+# the app. Built up in steps: source, stop + reset + apply exist so far; a real
+# run without --no-restart still ends with "!! not implemented yet" after the
+# apply (the app reinstall and the restart come in a later task).
 #
 # Usage:
 #   scripts/verify-install.sh --root DIR (--pr N | --branch B | --path DIR) [options]
@@ -25,15 +26,22 @@
 #                    git toplevel of the directory holding this script)
 #   --remote NAME    git remote to fetch from (default: origin)
 #   --sets LIST      comma list of patch sets, e.g. b,k (default: all, no --only)
-#   --no-restart     patch and reinstall but leave the gateway stopped
+#   --no-restart     patch (and reinstall the app) but leave the gateway stopped
 #   --dry-run        fetch and resolve the commit (this only writes FETCH_HEAD in
 #                    --repo), then print what a real run would do; creates nothing
 #   -h, --help       show this help
 #
-# Safety: nothing is written outside --root/checkouts in this step. Branches of
-# --repo are never created, moved or deleted, and other worktrees are never
-# touched. A checkout whose working tree has changes is refused, never reset, and
-# a checkouts entry that is not a worktree of --repo is never deleted.
+# Safety: writes only under --root (checkouts, logs, the venv's kiro_crew
+# package). Branches of --repo are never created, moved or deleted, and other
+# worktrees are never touched. A checkout whose working tree has changes is
+# refused, never reset, and a checkouts entry that is not a worktree of --repo is
+# never deleted. The kiro_crew reset deletes KC_SITE only when it is a real
+# directory path strictly inside the venv (basename kiro_crew, under a
+# site-packages component) and the pristine copy is there to replace it; the new
+# copy is made next to it first, so a failed copy keeps the old package.
+# apply.sh output goes to ROOT/logs/apply-<UTC timestamp>.log (one header per
+# run); a run fails on a non-zero exit, a missing "All sets applied", or a
+# "CHECK ANCHORS", "!!" or "FAILED" line, and the gateway stays stopped.
 # Errors: a line starting with "!! " on stderr and a non-zero exit (2 = usage).
 
 set -euo pipefail
@@ -202,11 +210,11 @@ if [ "$DIRTY" = 1 ]; then
   vwarn "DIRTY=1: $CHECKOUT has uncommitted changes; they are installed as they are"
 fi
 
-# ---- plan (dry run) / not implemented yet ------------------------------------
+# ---- plan (dry run) ----------------------------------------------------------
 if [ "$DRY_RUN" = 1 ]; then
   plan() { printf '[dry-run] %s\n' "$*"; }
   APPLY="env KC_SITE_OVERRIDE=$KC_SITE KC_PYTHON=$VENV/bin/python bash $CHECKOUT/gateway-patches/apply.sh${SETS:+ --only $SETS}"
-  vlog "plan (nothing was created; later steps are not implemented yet)"
+  vlog "plan (nothing was created)"
   plan "1. stop: systemctl --user stop $UNIT"
   plan "2. reset kiro_crew: replace $KC_SITE with a copy of $KC_SRC/src/kiro_crew"
   plan "3. apply.sh (first run): $APPLY"
@@ -225,4 +233,96 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
-vdie "not implemented yet: reset + apply (Task 5)"
+# ---- stop the gateway --------------------------------------------------------
+command -v systemctl >/dev/null 2>&1 || vdie "systemctl is not on PATH"
+vlog "stop: systemctl --user stop $UNIT"
+set +e
+stop_out=$(systemctl --user stop "$UNIT" 2>&1)
+stop_rc=$?
+set -e
+if [ "$stop_rc" = 5 ]; then
+  # Some systemd versions answer an unknown or not-loaded unit with exit 5.
+  vwarn "$UNIT is not loaded (systemctl exit 5); nothing to stop"
+elif [ "$stop_rc" != 0 ]; then
+  vdie "systemctl --user stop $UNIT failed (exit $stop_rc): $stop_out"
+fi
+
+# ---- reset kiro_crew to the pristine copy -------------------------------------
+# This is the only place the script deletes anything outside its own checkouts,
+# so every condition that makes the rm safe is checked first.
+[ -f "$KC_SRC/src/kiro_crew/__init__.py" ] \
+  || vdie "$KC_SRC/src/kiro_crew/__init__.py not found: the pristine Kiro Crew copy is missing; run scripts/verify-init.sh --root $ROOT"
+[ -n "$VENV" ] && [ -n "$KC_SITE" ] || vdie "VENV or KC_SITE is empty in $ROOT/verify.env"
+[ ! -L "$KC_SITE" ] || vdie "refusing to reset $KC_SITE: it is a symlink"
+VENV_REAL=$(realpath -- "$VENV") || vdie "cannot resolve VENV: $VENV"
+SITE_REAL=$(realpath -m -- "$KC_SITE") || vdie "cannot resolve KC_SITE: $KC_SITE"
+SRC_PKG_REAL=$(realpath -- "$KC_SRC/src/kiro_crew") || vdie "cannot resolve $KC_SRC/src/kiro_crew"
+case "$SITE_REAL" in
+  "$VENV_REAL"/*) ;;
+  *) vdie "refusing to reset $KC_SITE: it is not strictly inside the venv $VENV_REAL" ;;
+esac
+[ "$(basename -- "$SITE_REAL")" = kiro_crew ] \
+  || vdie "refusing to reset $SITE_REAL: its name is not kiro_crew"
+case "/${SITE_REAL#"$VENV_REAL"/}/" in
+  */site-packages/*) ;;
+  *) vdie "refusing to reset $SITE_REAL: no site-packages directory in its path" ;;
+esac
+[ "$SITE_REAL" != "$SRC_PKG_REAL" ] || vdie "refusing to reset $SITE_REAL: it is the pristine copy"
+
+vlog "reset: $SITE_REAL <- $KC_SRC/src/kiro_crew"
+NEW_SITE="$SITE_REAL.verify-new.$$"
+mkdir -p -- "$(dirname -- "$SITE_REAL")" \
+  || vdie "cannot create $(dirname -- "$SITE_REAL")"
+[ ! -e "$NEW_SITE" ] && [ ! -L "$NEW_SITE" ] || vdie "$NEW_SITE already exists"
+reset_fail() {
+  rm -rf -- "$NEW_SITE"
+  vdie "$1"
+}
+cp -r -- "$SRC_PKG_REAL" "$NEW_SITE" || reset_fail "copying $SRC_PKG_REAL failed; $SITE_REAL is unchanged"
+chmod -R u+w -- "$NEW_SITE" || reset_fail "chmod of the new copy failed; $SITE_REAL is unchanged"
+rm -rf -- "$SITE_REAL" || reset_fail "cannot remove the old $SITE_REAL"
+mv -- "$NEW_SITE" "$SITE_REAL" || reset_fail "cannot move the new copy to $SITE_REAL; the venv has no kiro_crew now, run verify-init.sh again"
+
+# ---- apply the gateway patches (twice: the second run must be a no-op) --------
+LOG="$ROOT/logs/apply-$(date -u +%Y%m%dT%H%M%SZ).log"
+mkdir -p -- "$ROOT/logs" || vdie "cannot create $ROOT/logs"
+ONLY=()
+if [ -n "$SETS" ]; then ONLY=(--only "$SETS"); fi
+
+run_apply() {
+  local run="$1" out rc cmd why=""
+  cmd="env KC_SITE_OVERRIDE=$KC_SITE KC_PYTHON=$VENV/bin/python bash $CHECKOUT/gateway-patches/apply.sh${SETS:+ --only $SETS}"
+  vlog "apply.sh ($run run)"
+  set +e
+  out=$(env KC_SITE_OVERRIDE="$KC_SITE" KC_PYTHON="$VENV/bin/python" \
+    bash "$CHECKOUT/gateway-patches/apply.sh" ${ONLY[@]+"${ONLY[@]}"} 2>&1)
+  rc=$?
+  set -e
+  printf '=== apply.sh %s run: %s ===\n%s\n' "$run" "$cmd" "$out" >>"$LOG" \
+    || vdie "cannot write $LOG"
+
+  [ "$rc" = 0 ] || why="exit status $rc"
+  grep -q 'All sets applied' <<<"$out" || why="${why:+$why; }no 'All sets applied' line"
+  ! grep -q 'CHECK ANCHORS' <<<"$out" || why="${why:+$why; }'CHECK ANCHORS' in the output"
+  ! grep -q '^!!' <<<"$out" || why="${why:+$why; }a line starting with '!!'"
+  ! grep -q 'FAILED' <<<"$out" || why="${why:+$why; }'FAILED' in the output"
+  if [ -n "$why" ]; then
+    printf -- '-- last 40 lines of the %s run (%s):\n' "$run" "$why" >&2
+    tail -n 40 <<<"$out" >&2
+    vdie "apply.sh failed on the $run run, full log: $LOG"
+  fi
+}
+
+run_apply first
+run_apply rerun
+vlog "apply.sh: All sets applied on both runs, log: $LOG"
+
+if [ "$NO_RESTART" = 1 ]; then
+  vlog "patched, gateway left stopped (--no-restart)"
+  vlog "source: $KIND $ID at ${SHA:0:12}"
+  vlog "sets: ${SETS:-all}"
+  vlog "log: $LOG"
+  exit 0
+fi
+
+vdie "not implemented yet: app + restart (Task 6)"

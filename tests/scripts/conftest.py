@@ -22,7 +22,7 @@ SCRIPTS = REPO / "scripts"
 _REAL_TOOLS = (
     "bash", "env", "git", "realpath", "dirname", "basename", "mktemp", "mv",
     "mkdir", "cat", "chmod", "rm", "ls", "grep", "sed", "tr", "head", "sort",
-    "readlink", "uname", "id", "date", "sleep", "cp", "ln", "touch", "wc", "stat",
+    "readlink", "uname", "id", "date", "sleep", "cp", "ln", "touch", "wc", "stat", "tail",
 )
 
 
